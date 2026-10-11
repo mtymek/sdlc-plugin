@@ -97,9 +97,64 @@ Conditional steps — triggered automatically, not part of the step list you
 configure:
 
 - `received-review` — Runs when review findings meet or exceed the configured
-  severity threshold. Ship passes it every such finding verbatim.
+  severity threshold. Ship passes it every such finding verbatim. The run
+  records it as a step. With no finding at or above the threshold, the step
+  completes with 0 fixes.
 - `commit-fixes` — Commits the fixes `received-review` made, as a separate
   commit from your feature commit.
+
+### The received-review step
+
+When `review` is a configured step, the saved state of a run has a
+`received-review` step right after `review`. The step starts as `pending`.
+It does not block a later step while it is `pending`.
+
+Ship records the step with two calls. `begin-step` starts it, and
+`complete-step` ends it. On routes 2 to 6 below, ship makes both calls, also
+when nothing needs a fix. A run that fails in this step calls `fail` in
+place of `complete-step`.
+
+Ship counts three numbers from the review output:
+
+- `K` — the findings at or above `flags.reviewThreshold`.
+- `M` — the total of findings in the header of the review output.
+- `P` — the finding headings that ship parsed.
+
+Ship checks the routes in this order. The first route that matches wins.
+
+| Route | When | What ship does | Result of `complete-step` |
+|---|---|---|---|
+| 1 | `M` is known and `P` is less than `M` | Asks whether to run `/review` again. It calls no step action before you answer. Run again: review starts over. Continue: routes 2 to 6 with the parsed findings. With `--auto`, ship does not ask: it continues. | none yet |
+| 2 | `K` is 1 or more | Starts the step, dispatches `/received-review`, runs `commit-fixes` when `/received-review` changed files, then ends the step. | `K finding(s) sent to received-review` |
+| 3 | `K` is 0 and `M` is 0 | Starts the step and ends it. It dispatches nothing. | `0 fixes — no findings` |
+| 4 | `K` is 0 and `M` is unknown | Starts the step and ends it. It dispatches nothing. | `0 fixes — no finding at or above the threshold` |
+| 5 | `K` is 0, `M` is 1 or more, and `P` is `M` or more | Starts the step and ends it. It dispatches nothing. | `0 fixes — all M findings below threshold` |
+| 6 | `K` is 0 and `P` is less than `M` (you chose Continue) | Starts the step and ends it. It dispatches nothing. | `0 fixes — parsed P of M findings, none at or above the threshold` |
+| — | The dispatch fails, you stop it, it returns no result, or `commit-fixes` fails | Stops a worker that can still run with `TaskStop`. When that fails (ship runs nested under another dispatch), records the worker as possibly still running. Then calls `fail` with the reason. The step is `failed`, and the issue list of the run shows it. | none |
+
+In the result text, `K`, `M` and `P` stand for the numbers of the run. The
+`await-remote-review` step can dispatch `/received-review` again. That
+dispatch records a decision only, with `decide` on `received-review`. It
+makes no second `begin-step`, because that would set the completed step back
+to `in_progress`. On
+routes 3 to 6, ship dispatches nothing. A finding below the threshold is not
+lost: ship saves it for [/deferred](deferred.md). After the step, ship goes
+on with the rebase.
+
+On `--resume`, the saved status of the step decides what ship does:
+
+- `completed` — ship does not call `/received-review` again. It goes on with
+  the rebase.
+- `pending`, `in_progress` or `failed`, after a completed `review` — ship
+  does not run the routes again. The resumed session no longer has the
+  review output, and a second deferral of a finding makes a duplicate entry.
+  When a fix is still in progress and the tree has uncommitted changes, ship
+  fails the step and stops, so you can check the changes. Otherwise it
+  commits finished fixes, records a decision, and ends the step with
+  `resumed — review output lost`. The findings that have no fix or deferral
+  record show as `UNACCOUNTED` in the summary. Run `/sdlc:review` and then
+  `/sdlc:received-review` to get them back. With `--auto`, ship does the
+  same and asks nothing.
 
 ## Examples
 

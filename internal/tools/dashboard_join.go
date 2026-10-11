@@ -32,7 +32,10 @@ const dashboardExecuteRefPrefix = "execute:"
 // does not decode gives no plan step. A data.healing.fixProgress list with a
 // valid record gives the received-review station
 // (dashboardAttachReceivedReview). A fixProgress value that is not a list, or
-// a list with records and none valid, adds a state issue.
+// a list with records and none valid, adds a state issue. A review step with
+// review totals also gets detail.reviewQueue from dashboardReviewQueue, built
+// after the received-review station, so the fix records are in it. The
+// issues of dashboardReviewQueue go to the pipeline issues.
 func dashboardShipDetail(p *DashboardPipeline, st *state.State) {
 	data := st.Data
 	p.SessionID = dashboardStr(data["sessionId"])
@@ -82,6 +85,16 @@ func dashboardShipDetail(p *DashboardPipeline, st *state.State) {
 	rr, problem := dashboardReceivedReviewStep(healing, runCompleted)
 	if rr != nil {
 		dashboardAttachReceivedReview(p, rr)
+	}
+	// The queue needs the review ledger: no ledger, no ReviewTotals, no queue.
+	if review := dashboardStepNamed(p, dashboardShipStepReview); review != nil && review.Detail != nil && review.Detail.ReviewTotals != nil {
+		var fixes []DashboardFix
+		if rr != nil && rr.Detail != nil {
+			fixes = rr.Detail.Fixes
+		}
+		var queueIssues []DashboardIssue
+		review.Detail.ReviewQueue, queueIssues = dashboardReviewQueue(data, review.Detail.ReviewTotals, fixes)
+		p.Issues = append(p.Issues, queueIssues...)
 	}
 	if problem != "" {
 		p.Issues = append(p.Issues, DashboardIssue{Source: dashboardSourceState, Severity: "medium", Text: problem})
@@ -138,13 +151,15 @@ func (sp *dashboardTimeSpan) addLast(s string) {
 // holds no valid record. problem is the text of a state issue: set when the
 // value is not a list (null included), or is a list with records and none
 // of them valid, else empty. A record that is not a map, has no title, or
-// has a status outside healingFixStatuses or a severity outside
-// dimensions.ValidSeverities is skipped: the page puts both values into CSS
-// class names. Each valid record gives one fix row, in list order. The step
-// is in_progress while a record is not in healingFixFinal and the run is
-// live (runCompleted false), else completed. startedAt is the earliest
-// parsable firstAt; completedAt is the latest parsable updatedAt, and is
-// absent while the step runs. A time that does not parse is skipped.
+// has a status outside healingFixStatuses, a severity outside
+// dimensions.ValidSeverities, or an origin outside healingOrigins is
+// skipped: the page puts status and severity into CSS class names. A record
+// with no origin gets healingOriginLocal. Each valid record gives one fix
+// row, with its origin, in list order. The step is in_progress while a record
+// is not in healingFixFinal and the run is live (runCompleted false), else
+// completed. startedAt is the earliest parsable firstAt; completedAt is the
+// latest parsable updatedAt, and is absent while the step runs. A time that
+// does not parse is skipped.
 func dashboardReceivedReviewStep(healing map[string]any, runCompleted bool) (step *DashboardStep, problem string) {
 	raw, present := healing["fixProgress"]
 	if !present {
@@ -164,7 +179,11 @@ func dashboardReceivedReviewStep(healing map[string]any, runCompleted bool) (ste
 		}
 		title := dashboardStr(m["title"])
 		status, severity := dashboardStr(m["status"]), dashboardStr(m["severity"])
-		if title == "" || !slices.Contains(healingFixStatuses, status) || !slices.Contains(dimensions.ValidSeverities, severity) {
+		origin := dashboardStr(m["origin"])
+		if origin == "" {
+			origin = healingOriginLocal
+		}
+		if title == "" || !slices.Contains(healingFixStatuses, status) || !slices.Contains(dimensions.ValidSeverities, severity) || !slices.Contains(healingOrigins, origin) {
 			continue
 		}
 		fixes = append(fixes, DashboardFix{
@@ -173,6 +192,7 @@ func dashboardReceivedReviewStep(healing map[string]any, runCompleted bool) (ste
 			File:     dashboardStr(m["file"]),
 			Line:     dashboardInt(m["line"]),
 			Status:   status,
+			Origin:   origin,
 		})
 		if !slices.Contains(healingFixFinal, status) {
 			open = true
@@ -453,10 +473,13 @@ func dashboardNestExecute(ship *DashboardPipeline, exec DashboardPipeline) {
 // rows (FindingItems): the review issues whose Ref is the dimension name, in
 // issue order, the same rows the standalone review lists; a dimension with no
 // finding gets an empty, non-nil list. The plan totals go to the step
-// reviewPlan; with no planned dimension it stays absent. The review issues go
-// to the ship issues with their Ref unchanged. A review with no rows gives an
-// empty, non-nil dimension list. The review ledger name goes to the ship join
-// members, so an archive of the ship finds the nested run.
+// reviewPlan; with no planned dimension it stays absent. When the step already
+// has a reviewQueue, dashboardQueueAddFindings joins the dimensions into it:
+// it adds open rows to an empty queue, or the dimension and text to the rows
+// of a queue that has rows. The issues it returns go to the ship issues. The
+// review issues go to the ship issues with their Ref unchanged. A review with
+// no rows gives an empty, non-nil dimension list. The review ledger name goes
+// to the ship join members, so an archive of the ship finds the nested run.
 func dashboardNestReview(ship *DashboardPipeline, review DashboardPipeline) {
 	ship.join.members = append(ship.join.members, review.ID)
 	dims := make([]DashboardDimension, 0, len(review.join.reviewDims))
@@ -470,6 +493,9 @@ func dashboardNestReview(ship *DashboardPipeline, review DashboardPipeline) {
 		}
 		step.Detail.Dimensions = dims
 		step.Detail.ReviewPlan = review.join.reviewPlan
+		if step.Detail.ReviewQueue != nil {
+			ship.Issues = append(ship.Issues, dashboardQueueAddFindings(step.Detail.ReviewQueue, dims)...)
+		}
 	}
 	ship.Issues = append(ship.Issues, review.Issues...)
 }

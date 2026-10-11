@@ -39,8 +39,12 @@ const (
 	// dashboardStallAfter is the age of updatedAt after which a running
 	// pipeline shows as stalled.
 	dashboardStallAfter = 30 * time.Minute
-	// dashboardHistoryWindow is how long a completed or failed pipeline
-	// stays on the dashboard after its updatedAt.
+	// dashboardPipelineWindow is how long a completed or failed pipeline
+	// stays on the dashboard after its updatedAt. It matches the default
+	// state.gc.ttlDays (7 days), after which the state file is swept.
+	dashboardPipelineWindow = 7 * 24 * time.Hour
+	// dashboardHistoryWindow is how far back the dashboard lists open waits
+	// and learnings log entries.
 	dashboardHistoryWindow = 24 * time.Hour
 	// dashboardReviewPrefix starts the folder name of a review run under
 	// runs/ledger/.
@@ -75,10 +79,22 @@ type DashboardRepo struct {
 	Warnings  []string            `json:"warnings"` // [] until filled, never null
 	Preplans  []DashboardPreplan  `json:"preplans"` // [] until filled, never null
 	Pipelines []DashboardPipeline `json:"pipelines"`
+	LoneWaits []DashboardWait     `json:"loneWaits"` // [] until filled, never null
 	Sessions  []DashboardSession  `json:"sessions"`
 	Learnings []DashboardLearning `json:"learnings"`
 	Deferred  []DashboardDeferred `json:"deferred"`
 	History   []DashboardRun      `json:"history"` // [] until filled, never null
+}
+
+// DashboardWait is one open wait that matches no shown pipeline.
+type DashboardWait struct {
+	Kind      string `json:"kind"` // "question" | "permission"
+	SessionID string `json:"sessionId"`
+	ToolUseID string `json:"toolUseId"` // "" for a permission wait
+	Branch    string `json:"branch"`
+	Header    string `json:"header"`
+	Text      string `json:"text"`    // copied from the record: attention.Write redacts it and keeps at most 121 runes (120 plus "…")
+	AskedAt   string `json:"askedAt"` // RFC3339 UTC
 }
 
 // DashboardPipeline is one ship, execute, plan, or review run.
@@ -174,7 +190,42 @@ type DashboardStepDetail struct {
 	Outcomes     []DashboardFindingOutcome `json:"outcomes,omitempty"`    // kind rounds
 	ReviewPlan   *DashboardReviewPlan      `json:"reviewPlan,omitempty"`  // kind dimensions
 	Fixes        []DashboardFix            `json:"fixes,omitempty"`       // kind fixes
+	ReviewQueue  *DashboardReviewQueue     `json:"reviewQueue,omitempty"` // review step of a ship run
 }
+
+// DashboardReviewQueue is the review queue of a ship review step.
+type DashboardReviewQueue struct {
+	Threshold string              `json:"threshold"` // a dimensions.ValidSeverities value
+	Rows      []DashboardQueueRow `json:"rows"`      // [] when empty, never null; max 200
+	Unrouted  int                 `json:"unrouted"`  // findings that no step took yet
+	Reason    string              `json:"reason"`    // "" | dashboardQueueReason* value
+}
+
+// DashboardQueueRow is one finding of the queue.
+type DashboardQueueRow struct {
+	Title     string `json:"title"` // dashboardPreview: redacted, max 120 runes
+	Severity  string `json:"severity"`
+	File      string `json:"file"`
+	Line      string `json:"line"`      // "" when none
+	Status    string `json:"status"`    // dashboardQueueStatus* value, or one of healingFixStatuses
+	Origin    string `json:"origin"`    // local-review | pr-comment
+	Dimension string `json:"dimension"` // "" when unknown
+	Text      string `json:"text"`      // review rationale or deferred description, "" when unknown
+}
+
+// Queue row statuses and queue reasons. The page uses the same strings. The
+// other row statuses are the fix statuses of healingFixStatuses: the queue
+// copies them and adds no new string. dashboardQueueStatusDeferred, the
+// status of a deferred finding that is not below the threshold, is also a
+// member of healingFixStatuses. The fix origin of a row is one of
+// healingOrigins; healingOriginLocal is the default.
+const (
+	dashboardQueueStatusOpen     = "open"
+	dashboardQueueStatusBelow    = "below"
+	dashboardQueueStatusDeferred = "deferred"
+	dashboardQueueReasonNone     = "no-findings"
+	dashboardQueueReasonAllBelow = "all-below-threshold"
+)
 
 // DashboardFix is one finding that received-review took. Line 0 means no
 // line.
@@ -184,6 +235,7 @@ type DashboardFix struct {
 	File     string `json:"file"`
 	Line     int    `json:"line,omitempty"`
 	Status   string `json:"status"` // one of healingFixStatuses
+	Origin   string `json:"origin"` // one of healingOrigins
 }
 
 // DashboardGuardrailCounts is the guardrail count of a plan setup station.
@@ -304,6 +356,12 @@ type DashboardRun struct {
 	// linked plan.
 	PlanStartedAt  string `json:"planStartedAt,omitempty"`
 	PlanDurationMs int64  `json:"planDurationMs,omitempty"`
+	// PlanPaired is true when the History pairing pass gave this ship row the
+	// plan time of a plan row of the same branch (it has no stored plan
+	// fields). Absent otherwise. PlanEndedAt (RFC 3339) is the end of that
+	// plan row; absent when no plan row was paired.
+	PlanPaired  bool   `json:"planPaired,omitempty"`
+	PlanEndedAt string `json:"planEndedAt,omitempty"`
 	// TotalMs is the time from the plan start to EndedAt for a ship row with
 	// a linked plan, else DurationMs. 0 means unknown.
 	TotalMs int64 `json:"totalMs"`
@@ -399,8 +457,9 @@ type DashboardDeferred struct {
 // CollectDashboardSnapshot reads the pipeline state of every repo in roots
 // and returns the dashboard snapshot. Roots that name the same repo (a
 // linked worktree's runs/ folder is a symlink to the main worktree's) give
-// one repo entry under the main root. now decides the stalled and 24 h
-// history rules; version is copied into the snapshot.
+// one repo entry under the main root. now decides the stalled, 7 day
+// pipeline and 24 h wait and learnings rules; version is copied into the
+// snapshot.
 func CollectDashboardSnapshot(roots []string, now time.Time, version string) DashboardSnapshot {
 	snap := DashboardSnapshot{
 		GeneratedAt: now.UTC().Format(time.RFC3339),
@@ -467,6 +526,7 @@ func collectDashboardRepo(root string, now time.Time) DashboardRepo {
 		Warnings:  []string{},
 		Preplans:  []DashboardPreplan{},
 		Pipelines: []DashboardPipeline{},
+		LoneWaits: []DashboardWait{},
 		Sessions:  []DashboardSession{},
 		Learnings: []DashboardLearning{},
 		Deferred:  []DashboardDeferred{},
@@ -488,17 +548,28 @@ func collectDashboardRepo(root string, now time.Time) DashboardRepo {
 		repo.Error = err.Error()
 	}
 	// Open waits are best effort: an unreadable record folder shows no
-	// attention and does not fail the snapshot. Unlike a state.List error,
-	// it does not set repo.Error, because the pipelines are still right.
-	// attention.List returns nil records with its error.
-	recs, _ := attention.List(root, now, dashboardHistoryWindow)
+	// attention, adds one warning, and does not fail the snapshot. Unlike a
+	// state.List error, it does not set repo.Error: the pipelines are still
+	// right. attention.List returns nil records with its error.
+	recs, attErr := attention.List(root, now, dashboardHistoryWindow)
+	if attErr != nil {
+		repo.Warnings = append(repo.Warnings, "Attention folder unread: "+attErr.Error())
+	}
+	// taken holds the index in recs of every record that belongs to a shown
+	// pipeline. The final pipelines are not a source for it: the join drops
+	// nested blocks and keeps only the newest record of a pipeline.
+	taken := map[int]bool{}
 	for _, st := range list.States {
 		p, updated, ok := dashboardStatePipeline(st, evidence)
+		var matched []int
 		if ok {
 			// Before dashboardFinish: the stalled rule reads p.Attention.
-			dashboardAttachAttention(&p, recs)
+			matched = dashboardAttachAttention(&p, recs)
 		}
 		if ok && dashboardFinish(&p, updated, now) {
+			for _, i := range matched {
+				taken[i] = true
+			}
 			// Inside the shown branch: only a shown ship run reads the
 			// execute state and runs.jsonl. A read problem is a warning,
 			// never repo.Error, because repo.Error blocks the archive of
@@ -517,6 +588,11 @@ func collectDashboardRepo(root string, now time.Time) DashboardRepo {
 		}
 	}
 	repo.Pipelines = dashboardJoinRuns(repo.Pipelines)
+	var older int
+	repo.LoneWaits, older = dashboardLoneWaits(recs, taken)
+	if older > 0 {
+		repo.Warnings = append(repo.Warnings, fmt.Sprintf("%d older open waits not shown", older))
+	}
 
 	sessions, learnings, deferred, history := dashboardActivity(root, now)
 	if sessions != nil {
@@ -547,11 +623,16 @@ func collectDashboardRepo(root string, now time.Time) DashboardRepo {
 // Of several matching records the newest askedAt wins; of equal askedAt the
 // later record in recs wins. A record whose askedAt does not parse is skipped.
 // With no matching record p is unchanged.
-func dashboardAttachAttention(p *DashboardPipeline, recs []attention.Record) {
+//
+// It returns the index of every record in recs that belongs to p, also when
+// no record has a parsable askedAt and p stays unchanged. It returns nil for
+// a pipeline that is not running or has no session ID.
+func dashboardAttachAttention(p *DashboardPipeline, recs []attention.Record) []int {
 	if p.Status != PipelineRunning || p.SessionID == "" {
-		return
+		return nil
 	}
 	slug := state.SlugifyBranch(p.Branch)
+	var matched []int
 	var best *attention.Record
 	var bestAt time.Time
 	for i := range recs {
@@ -559,6 +640,7 @@ func dashboardAttachAttention(p *DashboardPipeline, recs []attention.Record) {
 		if r.SessionID != p.SessionID || state.SlugifyBranch(r.Branch) != slug {
 			continue
 		}
+		matched = append(matched, i)
 		asked, ok := dashboardParseTime(r.AskedAt)
 		if !ok {
 			continue
@@ -568,7 +650,7 @@ func dashboardAttachAttention(p *DashboardPipeline, recs []attention.Record) {
 		}
 	}
 	if best == nil {
-		return
+		return matched
 	}
 	p.Attention = &DashboardAttention{
 		Kind:    best.Kind,
@@ -576,11 +658,64 @@ func dashboardAttachAttention(p *DashboardPipeline, recs []attention.Record) {
 		Header:  best.Header,
 		Text:    best.Text,
 	}
+	return matched
+}
+
+// dashboardLoneWaitLimit is the most waits dashboardLoneWaits returns.
+const dashboardLoneWaitLimit = 50
+
+// dashboardLoneWaits returns the records not in taken, newest askedAt first,
+// at most dashboardLoneWaitLimit. Never nil. taken holds indexes into recs.
+// older is the count of waits cut at dashboardLoneWaitLimit, 0 when none;
+// collectDashboardRepo adds a repo warning for it.
+// Header and Text are copied as they are: attention.Write already redacted
+// and cut them. A record whose askedAt does not parse is skipped, because it
+// cannot be put in order; attention.List never returns such a record. Of equal
+// askedAt the later record in recs comes first.
+func dashboardLoneWaits(recs []attention.Record, taken map[int]bool) (waits []DashboardWait, older int) {
+	type dated struct {
+		wait DashboardWait
+		at   time.Time
+	}
+	var found []dated
+	// Backwards, so the stable sort puts the later record of equal askedAt first.
+	for i := len(recs) - 1; i >= 0; i-- {
+		if taken[i] {
+			continue
+		}
+		r := recs[i]
+		asked, ok := dashboardParseTime(r.AskedAt)
+		if !ok {
+			continue
+		}
+		found = append(found, dated{
+			wait: DashboardWait{
+				Kind:      r.Kind,
+				SessionID: r.SessionID,
+				ToolUseID: r.ToolUseID,
+				Branch:    r.Branch,
+				Header:    r.Header,
+				Text:      r.Text,
+				AskedAt:   r.AskedAt,
+			},
+			at: asked,
+		})
+	}
+	sort.SliceStable(found, func(i, j int) bool { return found[i].at.After(found[j].at) })
+	if len(found) > dashboardLoneWaitLimit {
+		older = len(found) - dashboardLoneWaitLimit
+		found = found[:dashboardLoneWaitLimit]
+	}
+	waits = make([]DashboardWait, 0, len(found))
+	for _, d := range found {
+		waits = append(waits, d.wait)
+	}
+	return waits, older
 }
 
 // dashboardFinish stamps updatedAt, applies the stalled rule, and reports
 // whether the pipeline shows: a completed or failed pipeline shows only when
-// updatedAt is within dashboardHistoryWindow of now. A running pipeline with
+// updatedAt is within dashboardPipelineWindow of now. A running pipeline with
 // attention waits for a person, so it never turns stalled.
 func dashboardFinish(p *DashboardPipeline, updated, now time.Time) bool {
 	p.UpdatedAt = dashboardFormatTime(updated)
@@ -589,7 +724,7 @@ func dashboardFinish(p *DashboardPipeline, updated, now time.Time) bool {
 		dashboardAddStalledIssue(p)
 	}
 	if p.Status == PipelineCompleted || p.Status == PipelineFailed {
-		return !updated.IsZero() && now.Sub(updated) <= dashboardHistoryWindow
+		return !updated.IsZero() && now.Sub(updated) <= dashboardPipelineWindow
 	}
 	return true
 }

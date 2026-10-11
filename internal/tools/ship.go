@@ -165,8 +165,10 @@ type ShipPrepareOut struct {
 	PrunedOrphans []string `json:"prunedOrphans"`
 
 	// PipelineDisplay is a pipeline.PipelineTable render of the seeded step
-	// scaffold (state.Data["steps"], in configured order) — populated only
-	// once state init actually happens (empty on the --gc or errors path).
+	// scaffold (state.Data["steps"]): the configured steps in pipeline
+	// order, plus the received-review row that shipSeedReceivedReview adds
+	// after review when review is configured. Populated only once state init
+	// actually happens (empty on the --gc or errors path).
 	PipelineDisplay string `json:"pipelineDisplay,omitempty"`
 
 	// Openspec reports the plan's staged OpenSpec change, materialized into
@@ -559,6 +561,7 @@ func shipPrepare(cfgRoot, activeRoot string, in ShipPrepareIn) (ShipPrepareOut, 
 	st.Data["versionCfg"] = versionCfg
 	st.Data["binaryVersion"] = binaryVersion
 	scaffold := shipmeta.InitialShipStepsFromConfig(stepsList)
+	scaffold = shipSeedReceivedReview(scaffold)
 	st.Data["steps"] = scaffold
 	st.Data["decisions"] = []any{}
 	st.Data["deferredFindings"] = []any{}
@@ -595,6 +598,36 @@ var shipStepDescriptions = map[string]string{
 	"verify-pipeline":     "Wait for CI/pipeline checks to pass",
 	"await-remote-review": "Wait for remote reviewer approval",
 	"learnings-commit":    "Commit captured learnings",
+}
+
+// shipReceivedReviewCondition is the trigger text of the seeded
+// received-review entry. The condition key keeps a pending entry from
+// blocking later steps (shipStepBlocksProceed, shipValidatePipelineContract).
+const shipReceivedReviewCondition = "if review findings at or above the threshold"
+
+// shipSeedReceivedReview returns steps with a received-review entry right
+// after review. With no review entry, it returns steps unchanged.
+//
+// received-review is a conditional step: the config rejects it (see
+// shipmeta.IsConditionalShipStep), so it never comes from the step list. The
+// seed gives the ship skill an entry to run begin-step and complete-step on,
+// which records startedAt and completedAt for the dashboard.
+func shipSeedReceivedReview(steps []shipmeta.ShipStateStep) []shipmeta.ShipStateStep {
+	for i, s := range steps {
+		if s.Name != "review" {
+			continue
+		}
+		seeded := make([]shipmeta.ShipStateStep, 0, len(steps)+1)
+		seeded = append(seeded, steps[:i+1]...)
+		seeded = append(seeded, shipmeta.ShipStateStep{
+			Name:      "received-review",
+			Status:    "pending",
+			Condition: shipReceivedReviewCondition,
+			Kind:      "tracked",
+		})
+		return append(seeded, steps[i+1:]...)
+	}
+	return steps
 }
 
 // configStepsFromScaffold converts a seeded step scaffold into the
@@ -1430,7 +1463,7 @@ func shipBuildReviewLedger(healing map[string]any, deferredFindings []any) *Ship
 	fixedRecords, _ := healing["fixed"].([]any)
 	fixed := 0
 	for _, f := range fixedRecords {
-		if m, ok := f.(map[string]any); ok && m["origin"] == "local-review" {
+		if m, ok := f.(map[string]any); ok && m["origin"] == healingOriginLocal {
 			fixed++
 		}
 	}
@@ -1566,7 +1599,7 @@ func shipBuildReportData(data map[string]any, now time.Time) ShipReportData {
 // tools.
 func RegisterShipTools(s *mcpserver.Server) {
 	mcpserver.Register(s, "ship_prepare",
-		"Merge ship CLI flags with ship config, validate the resolved pipeline (pure checks only — no gh-auth or openspec-aware step computation), and initialize ship execution state. ship.steps and ship.quick are tables of true/false per step; the plugin fixes the step order. An old list shape, a non-boolean value or a duplicate --steps name is reported in errors with the fix.",
+		"Merge ship CLI flags with ship config, validate the resolved pipeline (pure checks only — no gh-auth or openspec-aware step computation), and initialize ship execution state. The state file's steps[] holds one entry per configured step; when review is a configured step, it also holds a pending received-review entry with a condition key right after review. pipelineDisplay shows the same rows; flags.steps does not list received-review. ship.steps and ship.quick are tables of true/false per step; the plugin fixes the step order. An old list shape, a non-boolean value or a duplicate --steps name is reported in errors with the fix.",
 		mcpserver.Annotations{
 			Title:       "Prepare ship pipeline run",
 			ReadOnly:    false,

@@ -132,12 +132,35 @@ func Write(mainRoot string, r Record) error {
 	return fsx.AtomicWriteJSON(filepath.Join(dir, name), r)
 }
 
-// remove deletes one file. A missing file is not an error.
-func remove(path string) error {
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("attention: remove %s: %w", path, err)
+// remove deletes one file. removed is false when no file existed, and then
+// err is nil: a missing file is not an error.
+func remove(path string) (removed bool, err error) {
+	if err := os.Remove(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, fmt.Errorf("attention: remove %s: %w", path, err)
 	}
-	return nil
+	return true, nil
+}
+
+// DeleteRecord deletes the record file of kind for sessionID (and toolUseID
+// for a question). It uses questionFile and permissionFile, so each name goes
+// through safe(). removed is false when no file existed, and then err is nil.
+// A permission record has no tool-use ID: DeleteRecord ignores toolUseID for
+// it. DeleteRecord returns an error for an unknown kind, an empty session ID,
+// a question with no tool-use ID, and a remove that fails for a reason other
+// than a missing file. Unlike DeleteQuestion, an empty tool-use ID never
+// deletes more than one record.
+func DeleteRecord(mainRoot, kind, sessionID, toolUseID string) (removed bool, err error) {
+	if err := validate(Record{Kind: kind, SessionID: sessionID, ToolUseID: toolUseID}); err != nil {
+		return false, err
+	}
+	name := permissionFile(sessionID)
+	if kind == KindQuestion {
+		name = questionFile(sessionID, toolUseID)
+	}
+	return remove(filepath.Join(Dir(mainRoot), name))
 }
 
 // DeleteQuestion deletes the question record of one tool-use ID. When
@@ -148,7 +171,8 @@ func DeleteQuestion(mainRoot, sessionID, toolUseID string) error {
 		return errors.New("attention: empty session ID")
 	}
 	if toolUseID != "" {
-		return remove(filepath.Join(Dir(mainRoot), questionFile(sessionID, toolUseID)))
+		_, err := remove(filepath.Join(Dir(mainRoot), questionFile(sessionID, toolUseID)))
+		return err
 	}
 	return deleteSessionRecords(mainRoot, sessionID, KindQuestion)
 }
@@ -159,7 +183,8 @@ func DeletePermission(mainRoot, sessionID string) error {
 	if sessionID == "" {
 		return errors.New("attention: empty session ID")
 	}
-	return remove(filepath.Join(Dir(mainRoot), permissionFile(sessionID)))
+	_, err := remove(filepath.Join(Dir(mainRoot), permissionFile(sessionID)))
+	return err
 }
 
 // DeleteSession deletes every record of the session, of any kind. A missing
@@ -211,7 +236,7 @@ func deleteSessionRecords(mainRoot, sessionID, kind string) error {
 		if kind != "" && fileKind != kind {
 			continue
 		}
-		if err := remove(filepath.Join(dir, name)); err != nil && firstErr == nil {
+		if _, err := remove(filepath.Join(dir, name)); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}

@@ -192,13 +192,62 @@
   }
 
   /**
+   * The card of one lone wait: an open wait that no shown pipeline owns. It
+   * has the wait banner of a pipeline (the bar with the wait age, then the
+   * header and the text), then a head with a lamp, the wait kind, the branch,
+   * the repo name and the Dismiss button. The card and the button carry the
+   * key `sessionId|toolUseId`, with an empty toolUseId for a permission wait.
+   * The click handler in app.js reads data-wait-dismiss, data-wait-kind and
+   * data-repo.
+   * @param {Document} doc
+   * @param {object} view
+   * @param {{root: string, name: string}} repo
+   * @param {{kind: string, sessionId: string, toolUseId?: string, branch?: string, header?: string, text?: string, askedAt?: string}} wait
+   *   an entry of repo.loneWaits
+   * @param {Date|number} [now] the time for the wait age; defaults to the current time
+   * @returns {Element} article.pipe-block.attn.lone-wait with data-lone-wait
+   */
+  function loneWaitCard(doc, view, repo, wait, now) {
+    var at = now != null ? now : Date.now();
+    var id = (wait.sessionId || '') + '|' + (wait.toolUseId || '');
+    var card = el(doc, 'article', 'pipe-block attn lone-wait');
+    card.setAttribute('data-lone-wait', id);
+
+    var lamp = el(doc, 'span', 'lamp running waiting');
+    lamp.setAttribute('aria-hidden', 'true');
+
+    var branch = wait.branch ? el(doc, 'h2', 'pipe-branch', wait.branch) : null;
+    if (branch) branch.setAttribute('title', wait.branch);
+
+    var repoName = el(doc, 'span', 'pipe-repo', repo.name);
+    repoName.setAttribute('title', repo.root);
+
+    var dismiss = el(doc, 'button', 'wait-dismiss', 'Dismiss');
+    dismiss.setAttribute('type', 'button');
+    dismiss.setAttribute('data-wait-dismiss', id);
+    dismiss.setAttribute('data-wait-kind', wait.kind || '');
+    dismiss.setAttribute('data-repo', repo.root);
+    dismiss.setAttribute('title', 'Remove this wait from the dashboard');
+
+    var head = append(el(doc, 'header', 'pipe-head'), [
+      lamp,
+      el(doc, 'span', 'pipe-kind', wait.kind),
+      branch,
+      append(el(doc, 'span', 'pipe-side'), [repoName, dismiss]),
+    ]);
+    // The banner comes first, as it does in the block of a pipeline.
+    append(card, attentionRows(doc, view, wait, at));
+    return append(card, [head]);
+  }
+
+  /**
    * The browser tab title for the repos in scope: view.pageTitle over the
    * repos that view.inScope accepts.
    * @param {object} view window.sdlcView
    * @param {string} base title without a count
    * @param {Array<{root: string}>} repos every repo of the snapshot
    * @param {Set<string>} scope selected repo roots; empty means every repo
-   * @returns {string} base, or "(N) " and base when N pipelines of the repos in scope wait for a person
+   * @returns {string} base, or "(N) " and base when N pipelines and lone waits of the repos in scope wait for a person
    */
   function scopedTitle(view, base, repos, scope) {
     return view.pageTitle(
@@ -999,6 +1048,154 @@
     return out;
   }
 
+  // The order of the review queue. Open work first, then findings with no
+  // fix record, then the closed ones.
+  var QUEUE_STATUS_RANK = { fixing: 0, queued: 1, failed: 2, open: 3, deferred: 4, fixed: 5, below: 6 };
+  var QUEUE_SEVERITY_RANK = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
+
+  // One chip of the review queue filter. kind is 'dim' or 'src'.
+  function queueChip(doc, pipelineId, kind, value, label, count, on) {
+    var chip = el(doc, 'button', 'chip');
+    chip.setAttribute('type', 'button');
+    chip.setAttribute('data-q-pipe', pipelineId);
+    chip.setAttribute('data-q-' + kind, value);
+    chip.setAttribute('aria-pressed', String(on));
+    return append(chip, [el(doc, 'span', '', label), el(doc, 'span', 'chip-n', count)]);
+  }
+
+  /**
+   * The review queue of a ship run, from `detail.reviewQueue`. The review
+   * totals line, the queue line `F of N fixed · …` with a progress bar, a row
+   * of source chips (local review, PR comments), a row of dimension chips,
+   * then one row for each finding: lamp
+   * and word by fix status, severity chip, title, and file, line and
+   * dimension. Each row opens the finding in the detail viewer.
+   * @param {Document} doc
+   * @param {object} view
+   * @param {{reviewQueue: {threshold?: string, unrouted?: number, reason?: string, rows?: Array}, dimensions?: Array, reviewTotals?: object, queueFilter?: {dim: string, src: string}, runLive?: boolean}} detail
+   * @param {{id?: string}} pipeline
+   * @returns {Element} div.review-queue
+   */
+  function reviewQueueBody(doc, view, detail, pipeline) {
+    var filter = detail.queueFilter || { dim: 'all', src: 'all' };
+    var out = el(doc, 'div', 'review-queue');
+    if (detail.reviewTotals) out.appendChild(el(doc, 'div', 'round-sum', view.reviewTotalsText(detail.reviewTotals)));
+
+    // The review threshold of the run: a finding below it is not fixed. It
+    // goes to the deferred list (source review-below-threshold).
+    var thresholdLine = el(doc, 'div', 'round-sum q-threshold');
+    var threshold = detail.reviewQueue.threshold;
+    append(thresholdLine, [
+      el(doc, 'span', '', 'Fix threshold: '),
+      el(doc, 'strong', '', threshold),
+      el(doc, 'span', '', ' · findings below it go to the deferred list'),
+    ]);
+    out.appendChild(thresholdLine);
+
+    var rows = [];
+    var dims = [];
+    var dimCount = {};
+    (detail.reviewQueue.rows || []).forEach(function (row, i) {
+      if (row.dimension) dimCount[row.dimension] = (dimCount[row.dimension] || 0) + 1;
+      rows.push({ dim: row.dimension, index: i, finding: row, status: row.status, order: i });
+    });
+    Object.keys(dimCount).forEach(function (name) {
+      dims.push({ name: name, count: dimCount[name] });
+    });
+
+    var counts = { fixed: 0, fixing: 0, queued: 0, failed: 0, deferred: 0, open: 0, below: 0, pr: 0 };
+    rows.forEach(function (r) {
+      counts[r.status] = (counts[r.status] || 0) + 1;
+      if (r.finding.origin === 'pr-comment') counts.pr++;
+    });
+    // Only the findings at or above the threshold qualify for a fix.
+    var qualified = rows.length - counts.below;
+    var parts = [{ strong: true, text: counts.fixed }, { text: ' of ' }, { strong: true, text: qualified }, { text: ' fixed' }];
+    ['fixing', 'queued', 'failed', 'deferred', 'open', 'below'].forEach(function (status) {
+      if (!counts[status]) return;
+      parts.push({ text: ' · ' });
+      parts.push({ strong: true, text: counts[status] });
+      var word = ' ' + status;
+      if (status === 'open') word = detail.runLive ? ' waiting for a fix' : ' with no fix record';
+      if (status === 'below') word = ' below threshold';
+      parts.push({ text: word });
+    });
+    var line = strongLine(doc, 'round-sum', parts);
+    var bar = el(doc, 'progress', 'fix-progress');
+    bar.setAttribute('max', String(qualified || 1));
+    bar.setAttribute('value', String(counts.fixed));
+    bar.setAttribute('aria-label', 'Qualified findings fixed');
+    append(out, [line, bar]);
+    var queue = detail.reviewQueue;
+    if (queue.unrouted > 0) {
+      out.appendChild(el(doc, 'p', 'generic-line', queue.unrouted + (queue.unrouted === 1 ? ' finding' : ' findings') + ' not routed yet'));
+    }
+    if (queue.reason === 'all-below-threshold') {
+      var found = (detail.reviewTotals && detail.reviewTotals.found) || rows.length;
+      out.appendChild(el(doc, 'p', 'generic-line', 'All ' + found + (found === 1 ? ' finding' : ' findings') + ' below threshold'));
+    }
+
+    var id = (pipeline && pipeline.id) || '';
+    var srcRow = el(doc, 'div', 'chips q-filter');
+    srcRow.setAttribute('role', 'group');
+    srcRow.setAttribute('aria-label', 'Filter by source');
+    var remote = queueChip(doc, id, 'src', 'pr', 'PR comments', counts.pr, filter.src === 'pr');
+    append(srcRow, [
+      queueChip(doc, id, 'src', 'all', 'all sources', rows.length, filter.src === 'all'),
+      queueChip(doc, id, 'src', 'local', 'local review', rows.length - counts.pr, filter.src === 'local'),
+      remote,
+    ]);
+    var dimRow = el(doc, 'div', 'chips q-filter');
+    dimRow.setAttribute('role', 'group');
+    dimRow.setAttribute('aria-label', 'Filter by dimension');
+    dimRow.appendChild(queueChip(doc, id, 'dim', 'all', 'all dimensions', rows.length, filter.dim === 'all'));
+    dims.forEach(function (d) {
+      dimRow.appendChild(queueChip(doc, id, 'dim', d.name, d.name, d.count, filter.dim === d.name));
+    });
+    var clean = (detail.dimensions || []).filter(function (d) { return !d.findings; }).length;
+    if (clean > 0) dimRow.appendChild(el(doc, 'span', 'q-clean', '+' + clean + ' clean'));
+    append(out, [srcRow, dimRow]);
+
+    var shown = rows.filter(function (r) {
+      if (filter.src === 'pr' && r.finding.origin !== 'pr-comment') return false;
+      if (filter.src === 'local' && r.finding.origin !== 'local-review') return false;
+      return filter.dim === 'all' || r.dim === filter.dim;
+    });
+    shown.sort(function (a, b) {
+      var s = QUEUE_STATUS_RANK[a.status] - QUEUE_STATUS_RANK[b.status];
+      if (s) return s;
+      var rank = function (sev) {
+        return Object.prototype.hasOwnProperty.call(QUEUE_SEVERITY_RANK, sev) ? QUEUE_SEVERITY_RANK[sev] : 9;
+      };
+      var v = rank(a.finding.severity) - rank(b.finding.severity);
+      return v || a.order - b.order;
+    });
+    if (shown.length === 0) {
+      out.appendChild(el(doc, 'p', 'generic-line', filter.src === 'pr' ? 'No PR comments in the snapshot yet.' : 'No findings.'));
+      return out;
+    }
+    var list = el(doc, 'div', 'fix-list');
+    shown.forEach(function (r) {
+      var f = r.finding;
+      var where = [(f.file || '') + (f.line ? ':' + f.line : ''), r.dim].filter(Boolean).join(' · ');
+      var word = r.status === 'open' ? (detail.runLive ? 'waiting' : 'no record') : r.status === 'below' ? 'below threshold' : r.status;
+      var main = append(el(doc, 'div', 'fix-main'), [
+        el(doc, 'div', 'fix-title', f.title),
+        el(doc, 'div', 'fix-where', where),
+      ]);
+      list.appendChild(
+        append(detailButton(doc, 'fix-row q-row', view.detailKey('queue-row', null, { pipeline: pipeline && pipeline.id, index: r.index })), [
+          lamp(doc, LAMP_BY_FIX[r.status] || 'stalled'),
+          el(doc, 'span', 'sev sev-' + f.severity, f.severity),
+          main,
+          el(doc, 'span', 'fix-status ' + r.status, word),
+        ])
+      );
+    });
+    out.appendChild(list);
+    return out;
+  }
+
   // Body builder by detail kind: (doc, view, detail, pipeline, step) -> Element.
   var TILE_BODIES = {
     waves: wavesBody,
@@ -1026,7 +1223,7 @@
     var detail = step.detail || {};
     var cls = 'step-sec' + (view.isWideSection(detail) ? ' wide' : '') + (selected ? ' selected' : '');
     var details = tile(doc, cls, step.name, lampClass(view, step.status), view.sectionMeta(step), open);
-    var body = TILE_BODIES[detail.kind];
+    var body = detail.reviewQueue ? reviewQueueBody : TILE_BODIES[detail.kind];
     if (body) details.appendChild(body(doc, view, detail, pipeline, step));
     return details;
   }
@@ -1212,7 +1409,12 @@
 
   // The columns of the History table, in order. A column with a sort key has a sort control.
   var HISTORY_COLUMNS = ['outcome', 'kind', 'branch', 'repo', 'finished', 'plan', 'ship', 'total'];
-  var HISTORY_SORTABLE = { finished: true, total: true };
+  var HISTORY_SORTABLE = { finished: true, plan: true, ship: true, total: true };
+
+  // The key of a History row for the selection: repo root, kind, branch and end time.
+  function historyKey(repo, run) {
+    return [(repo && repo.root) || '', run.kind || '', run.branch || '', run.endedAt || ''].join('\n');
+  }
 
   // One time cell of the History table: '—' when the value is unknown.
   function historyTime(doc, view, ms) {
@@ -1222,8 +1424,8 @@
 
   /**
    * The History tab: `Finished runs (n)`, a row of outcome chips that filter
-   * the table, and one table of the runs of the repos in scope. The finished
-   * and total controls sort the table: a new control starts with the largest
+   * the table, and one table of the runs of the repos in scope. The finished,
+   * plan, ship and total controls sort the table: a new control starts with the largest
    * value first, and a click on the active control flips the order. With no
    * active control the rows show newest first. Rows do not open.
    * @param {Document} doc
@@ -1281,7 +1483,31 @@
     panel.appendChild(bar);
     if (runs.length === 0) return append(panel, [emptyState(doc, 'no-history-outcome')]);
 
+    // The selection: the picked rows among the rows shown.
+    var picked = ui.historyPicked || {};
+    var pickedCount = runs.filter(function (run) {
+      return picked[historyKey(owner.get(run), run)];
+    }).length;
+    var tools = el(doc, 'div', 'hist-tools');
+    var countText = pickedCount === 0 ? 'Select rows to delete them' : pickedCount + ' selected';
+    var count = el(doc, 'span', 'hist-picked' + (pickedCount ? ' on' : ''), countText);
+    count.setAttribute('aria-live', 'polite');
+    // stop-btn gives the frame, the red hover and the disabled look of the header buttons.
+    var del = el(doc, 'button', 'stop-btn hist-delete', 'Delete selected');
+    del.setAttribute('type', 'button');
+    del.setAttribute('data-hist-delete', '');
+    del.setAttribute('title', 'Delete the selected runs from the history for good');
+    if (pickedCount === 0) del.disabled = true;
+    panel.appendChild(append(tools, [count, del]));
+
     var headRow = el(doc, 'tr', '');
+    var allBox = el(doc, 'input', 'hist-pick');
+    allBox.setAttribute('type', 'checkbox');
+    allBox.setAttribute('data-hist-pick-all', '');
+    allBox.setAttribute('aria-label', 'Select all shown runs');
+    allBox.checked = pickedCount > 0 && pickedCount === runs.length;
+    allBox.indeterminate = pickedCount > 0 && pickedCount < runs.length;
+    headRow.appendChild(append(el(doc, 'th', 'h-pick'), [allBox]));
     HISTORY_COLUMNS.forEach(function (name) {
       if (!HISTORY_SORTABLE[name]) {
         headRow.appendChild(el(doc, 'th', '', name));
@@ -1310,16 +1536,25 @@
       repoCell.setAttribute('title', repo.root);
       var when = el(doc, 'td', 'h-when', view.relativeWhen(run.endedAt, now, tz));
       when.setAttribute('title', run.endedAt || '');
+      var planCell = historyTime(doc, view, cells.planMs);
+      var totalCell = historyTime(doc, view, cells.totalMs);
+      var key = historyKey(repo, run);
+      var box = el(doc, 'input', 'hist-pick');
+      box.setAttribute('type', 'checkbox');
+      box.setAttribute('data-hist-pick', key);
+      box.setAttribute('aria-label', 'Select ' + run.kind + ' ' + run.branch + ', ' + (run.endedAt || ''));
+      box.checked = !!picked[key];
       body.appendChild(
-        append(el(doc, 'tr', ''), [
+        append(el(doc, 'tr', box.checked ? 'picked' : ''), [
+          append(el(doc, 'td', 'h-pick'), [box]),
           append(el(doc, 'td', ''), [outcomeTag]),
           el(doc, 'td', 'h-kind', run.kind),
           el(doc, 'td', 'h-branch', run.branch),
           repoCell,
           when,
-          historyTime(doc, view, cells.planMs),
+          planCell,
           historyTime(doc, view, cells.shipMs),
-          historyTime(doc, view, cells.totalMs),
+          totalCell,
         ])
       );
     });
@@ -1536,6 +1771,37 @@
   }
 
   /**
+   * The status cell of a preplan row: the status glyph and a menu of the
+   * statuses of view.PREPLAN_STATUSES. A choice in the menu sets the status of
+   * the topic file. A status outside the list shows as a disabled "unknown"
+   * entry, so the menu still shows the real value.
+   * @param {Document} doc
+   * @param {object} view
+   * @param {{repo: {root: string}, slug: string, topic?: string, status: string}} item
+   * @returns {Element} span.pp-status with the glyph and select.pp-menu
+   */
+  function preplanStatusMenu(doc, view, item) {
+    var label = view.preplanStatus(item.status);
+    var m = PREPLAN_MARKS[label];
+    var glyph = el(doc, 'span', 'pp-glyph', m.glyph);
+    glyph.setAttribute('aria-hidden', 'true');
+    var menu = el(doc, 'select', 'pp-menu');
+    menu.setAttribute('aria-label', 'Status of ' + (item.topic || item.slug));
+    menu.setAttribute('title', 'Change the status of this preplan');
+    menu.setAttribute('data-pp-set', item.slug);
+    menu.setAttribute('data-repo', item.repo.root || '');
+    var values = label === 'unknown' ? ['unknown'].concat(view.PREPLAN_STATUSES) : view.PREPLAN_STATUSES;
+    values.forEach(function (value) {
+      var option = el(doc, 'option', '', value);
+      option.value = value;
+      if (value === 'unknown') option.disabled = true;
+      if (value === label) option.selected = true;
+      menu.appendChild(option);
+    });
+    return append(el(doc, 'span', 'pp-status pp-set ' + m.cls), [glyph, menu]);
+  }
+
+  /**
    * The Preplans tab: `Preplans (n)`, one repo-warning line for each warning
    * of a repo in scope, a row of status chips that filter the table, then one
    * row for each topic file, newest change first. A status outside
@@ -1591,11 +1857,7 @@
         status: item.status,
         label: item.topic || item.slug,
       });
-      var label = view.preplanStatus(item.status);
-      var m = PREPLAN_MARKS[label];
-      var glyph = el(doc, 'span', '', m.glyph);
-      glyph.setAttribute('aria-hidden', 'true');
-      var tag = append(el(doc, 'span', 'pp-status ' + m.cls), [glyph, el(doc, 'span', '', label)]);
+      var tag = preplanStatusMenu(doc, view, item);
       var topic = append(el(doc, 'td', 'pp-topic'), [
         el(doc, 'div', 'pp-name', item.topic || item.slug),
         el(doc, 'div', 'pp-path', item.path),
@@ -1672,6 +1934,7 @@
     stationTrack: stationTrack,
     elapsedText: elapsedText,
     attentionRows: attentionRows,
+    loneWaitCard: loneWaitCard,
     scopedTitle: scopedTitle,
     tickElapsed: tickElapsed,
     pipelineBlock: pipelineBlock,

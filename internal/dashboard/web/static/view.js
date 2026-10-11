@@ -413,6 +413,151 @@
     return { ok: false, text: suggestion ? message + ' ' + suggestion : message };
   }
 
+  // --- Status menu and History delete ---------------------------------------
+
+  // The parts of a History row key (render.js historyKey): repo root, kind,
+  // branch and end time, joined by this separator.
+  var HISTORY_KEY_SEP = '\n';
+
+  // The key of a History row for the selection. render.js historyKey makes the same key.
+  function historyRowKey(root, run) {
+    return [root || '', run.kind || '', run.branch || '', run.endedAt || ''].join(HISTORY_KEY_SEP);
+  }
+
+  // The parts of a History row key, or null when the key has not four parts.
+  function splitHistoryKey(key) {
+    if (typeof key !== 'string') return null;
+    var parts = key.split(HISTORY_KEY_SEP);
+    if (parts.length !== 4) return null;
+    return { repo: parts[0], kind: parts[1], branch: parts[2], endedAt: parts[3] };
+  }
+
+  /**
+   * The request that sets the status of one preplan topic file. Use it as
+   * `fetch(req.url, req)`.
+   * @param {string} token the server's X-Sdlc-Token for this start
+   * @param {string} repo repo root
+   * @param {string} slug the topic slug
+   * @param {string} status one of PREPLAN_STATUSES
+   * @returns {{method: string, url: string, headers: object, body: string}|null}
+   *   null when token, repo, slug, or status is ''
+   */
+  function preplanStatusRequest(token, repo, slug, status) {
+    if (!token || !repo || !slug || !status) return null;
+    return guardedPost(token, '/api/preplan-status', { repo: repo, slug: slug, status: status });
+  }
+
+  /**
+   * The request that deletes History rows of one repo. Use it as
+   * `fetch(req.url, req)`.
+   * @param {string} token the server's X-Sdlc-Token for this start
+   * @param {string} repo repo root
+   * @param {Array<{kind: string, branch: string, endedAt: string}>} rows the
+   *   rows of this repo, one entry for each unique key
+   * @returns {{method: string, url: string, headers: object, body: string}|null}
+   *   null when token or repo is '' or rows is empty
+   */
+  function historyDeleteRequest(token, repo, rows) {
+    if (!token || !repo || !Array.isArray(rows) || rows.length === 0) return null;
+    return guardedPost(token, '/api/history-delete', {
+      repo: repo,
+      rows: rows.map(function (row) {
+        return { kind: row.kind, branch: row.branch || '', endedAt: row.endedAt };
+      }),
+    });
+  }
+
+  /**
+   * The request that dismisses one open wait that no pipeline shows (a lone
+   * wait). Use it as `fetch(req.url, req)`. The click asks no question.
+   * @param {string} token the server's X-Sdlc-Token for this start
+   * @param {string} repo repo root
+   * @param {{kind: string, sessionId: string, toolUseId?: string}} wait an
+   *   entry of repo.loneWaits; toolUseId is '' for a permission wait
+   * @returns {{method: string, url: string, headers: object, body: string}|null}
+   *   null when token, repo, wait.kind, or wait.sessionId is ''
+   */
+  function waitDismissRequest(token, repo, wait) {
+    if (!token || !repo || !wait || !wait.kind || !wait.sessionId) return null;
+    return guardedPost(token, '/api/wait-dismiss', {
+      repo: repo,
+      kind: wait.kind,
+      sessionId: wait.sessionId,
+      toolUseId: wait.toolUseId || '',
+    });
+  }
+
+  /**
+   * Groups selected History rows by repo.
+   * @param {Array<string>} keys the data-hist-pick values
+   * @returns {Array<{repo: string, rows: Array<{kind: string, branch: string, endedAt: string}>}>}
+   *   one entry for each repo in key order; a repeated key adds one row; a
+   *   key with no four parts adds none
+   */
+  function historyPicksByRepo(keys) {
+    var groups = [];
+    var byRepo = new Map();
+    var seen = new Set();
+    (keys || []).forEach(function (key) {
+      var parts = splitHistoryKey(key);
+      if (!parts || seen.has(key)) return;
+      seen.add(key);
+      var group = byRepo.get(parts.repo);
+      if (!group) {
+        group = { repo: parts.repo, rows: [] };
+        byRepo.set(parts.repo, group);
+        groups.push(group);
+      }
+      group.rows.push({ kind: parts.kind, branch: parts.branch, endedAt: parts.endedAt });
+    });
+    return groups;
+  }
+
+  /**
+   * The count of ship rows that lose their plan time in a delete: the
+   * planPaired ship rows whose repo, branch and planEndedAt match a selected
+   * plan row, and that are not selected themselves.
+   * @param {{repos?: Array}} snapshot
+   * @param {Array<string>} keys the data-hist-pick values of the selection
+   * @returns {number}
+   */
+  function pairedShipCount(snapshot, keys) {
+    var selected = new Set(keys || []);
+    var plans = new Set();
+    selected.forEach(function (key) {
+      var parts = splitHistoryKey(key);
+      if (parts && parts.kind === 'plan') plans.add(historyRowKey(parts.repo, parts));
+    });
+    if (plans.size === 0) return 0;
+    var count = 0;
+    ((snapshot && snapshot.repos) || []).forEach(function (repo) {
+      ((repo && repo.history) || []).forEach(function (run) {
+        if (!run || run.kind !== 'ship' || !run.planPaired || !run.planEndedAt) return;
+        // The plan row has kind 'plan' and the end time that the ship row names.
+        var planKey = historyRowKey(repo.root, { kind: 'plan', branch: run.branch, endedAt: run.planEndedAt });
+        if (plans.has(planKey) && !selected.has(historyRowKey(repo.root, run))) count++;
+      });
+    });
+    return count;
+  }
+
+  /**
+   * The question of the confirm dialog before a History delete. '\n' is a
+   * line break.
+   * @param {number} count the selected rows
+   * @param {number} paired the result of pairedShipCount
+   * @returns {string} a last line names the ship rows that lose their plan time, when paired > 0
+   */
+  function historyDeleteQuestion(count, paired) {
+    var noun = count === 1 ? '1 run' : count + ' runs';
+    var text = 'Delete ' + noun + ' from the history?\n' +
+      'This removes the rows from .sdlc-v2/history/runs.jsonl for good. The History tab and the run times lose them.';
+    if (paired > 0) {
+      text += '\n' + (paired === 1 ? '1 ship row loses its plan time.' : paired + ' ship rows lose their plan time.');
+    }
+    return text;
+  }
+
   /**
    * The result text of a clear over several repos: the freed size of the
    * requests that returned 200, then one line for each other request.
@@ -917,7 +1062,8 @@
   /**
    * Header counts over all repos; the repo filter does not apply. The
    * running, stalled, and failed counts follow the pipeline status. The
-   * waiting count is the number of pipelines that have an attention.
+   * waiting count is the number of pipelines that have an attention plus the
+   * number of lone waits.
    * @param {Array} repos
    * @returns {{running: number, stalled: number, failed: number, waiting: number}}
    */
@@ -931,13 +1077,15 @@
         }
         if (p.attention) counts.waiting++;
       });
+      counts.waiting += (repo.loneWaits || []).length;
     });
     return counts;
   }
 
   /**
-   * Browser tab title. A leading "(N) " shows the number of pipelines that
-   * wait for a person in the given repos; with none, the title is base.
+   * Browser tab title. A leading "(N) " shows the number of pipelines and
+   * lone waits that wait for a person in the given repos; with none, the
+   * title is base.
    * @param {string} base title without a count
    * @param {Array} repos the repos in scope
    * @returns {string}
@@ -948,6 +1096,7 @@
       (repo.pipelines || []).forEach(function (p) {
         if (p && p.attention) waiting++;
       });
+      waiting += (repo.loneWaits || []).length;
     });
     return waiting > 0 ? '(' + waiting + ') ' + base : base;
   }
@@ -1149,13 +1298,14 @@
    *   issue:    'issue:<where.pipeline>:<where.index>'
    *   learning: 'learning:<item.date>:<item.heading>'
    *   finding:  'finding:<where.pipeline>:<where.dimension>:<where.index>'
+   *   queue-row: 'queue-row:<where.pipeline>:<where.index>'
    * A key is built, never parsed: a heading or an id can hold ':'. Use
    * detailItem to find the item of a key.
-   * @param {string} kind 'deferred' | 'issue' | 'learning' | 'finding'
+   * @param {string} kind 'deferred' | 'issue' | 'learning' | 'finding' | 'queue-row'
    * @param {object} [item] the snapshot item (deferred and learning)
    * @param {{pipeline?: string, dimension?: string, index?: number}} [where]
    *   pipeline id, review dimension name, and row index in its list
-   *   (issue and finding). A standalone review step is one dimension, so
+   *   (issue, finding and queue-row). A standalone review step is one dimension, so
    *   its step name is the dimension name.
    * @returns {string} '' for an unknown kind or a missing key field
    */
@@ -1174,6 +1324,8 @@
         return at.pipeline && at.dimension && hasIndex
           ? 'finding:' + at.pipeline + ':' + at.dimension + ':' + at.index
           : '';
+      case 'queue-row':
+        return at.pipeline && hasIndex ? 'queue-row:' + at.pipeline + ':' + at.index : '';
       default:
         return '';
     }
@@ -1257,6 +1409,22 @@
     };
   }
 
+  function queueRowItem(root, pipelineId, row) {
+    return {
+      kind: 'queue-row',
+      repo: root,
+      title: joinTitle(row.severity, issueLocation({ file: row.file, line: row.line }), 'finding'),
+      text: textOf(row.text),
+      meta: metaRows([
+        ['Pipeline', pipelineId],
+        ['Title', row.title],
+        ['Status', row.status],
+        ['Origin', row.origin],
+        ['Dimension', row.dimension],
+      ]),
+    };
+  }
+
   // The finding of `list` whose key is `key`, as a viewer item, else null.
   function matchFinding(root, pipeline, dimension, list, key) {
     var rows = list || [];
@@ -1281,6 +1449,12 @@
       var detail = steps[s] && steps[s].detail;
       if (!detail) continue;
       var hit = null;
+      var queueRows = (detail.reviewQueue && detail.reviewQueue.rows) || [];
+      for (var q = 0; q < queueRows.length && !hit; q++) {
+        if (detailKey('queue-row', null, { pipeline: pipeline.id, index: q }) === key) {
+          hit = queueRowItem(root, pipeline.id, queueRows[q]);
+        }
+      }
       if (detail.kind === 'findings') {
         hit = matchFinding(root, pipeline, steps[s].name, detail.findings, key);
       } else if (detail.kind === 'dimensions') {
@@ -1442,7 +1616,7 @@
    * The sort after a click on a sort control. A new control starts with the
    * largest value first. A click on the active control flips its order.
    * @param {{key: string, dir: string}|null} sort
-   * @param {string} key finished | total
+   * @param {string} key finished | plan | ship | total
    * @returns {{key: string, dir: string}}
    */
   function nextHistorySort(sort, key) {
@@ -1461,12 +1635,20 @@
       var ms = run && run.totalMs;
       return typeof ms === 'number' && isFinite(ms) && ms > 0 ? ms : null;
     },
+    // The plan and ship values are the values of the cells (historyCells).
+    plan: function (run) {
+      return positiveMs(historyCells(run).planMs);
+    },
+    ship: function (run) {
+      return positiveMs(historyCells(run).shipMs);
+    },
   };
 
   /**
    * @param {Array} runs
    * @param {{key: string, dir: string}|null} sort null sorts by endedAt, newest first
-   * @returns {Array} a new array. finished sorts by endedAt, total by totalMs.
+   * @returns {Array} a new array. finished sorts by endedAt, total by totalMs,
+   *   plan and ship by the plan and ship cells of historyCells.
    *   Runs with no value go last in both orders; equal runs keep their order.
    */
   function sortHistory(runs, sort) {
@@ -1617,6 +1799,12 @@
     deleteKeyFromDataset: deleteKeyFromDataset,
     deletePrompt: deletePrompt,
     deleteResultText: deleteResultText,
+    preplanStatusRequest: preplanStatusRequest,
+    historyDeleteRequest: historyDeleteRequest,
+    waitDismissRequest: waitDismissRequest,
+    historyPicksByRepo: historyPicksByRepo,
+    pairedShipCount: pairedShipCount,
+    historyDeleteQuestion: historyDeleteQuestion,
     clearResultText: clearResultText,
     detailKey: detailKey,
     detailItem: detailItem,

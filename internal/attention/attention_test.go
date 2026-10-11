@@ -463,6 +463,154 @@ func TestDeletePermission_RemoveError(t *testing.T) {
 	}
 }
 
+// TestDeleteRecord_QuestionRemovesOnlyThatFile checks that a question DeleteRecord deletes
+// the file of one tool-use ID, reports removed, and keeps the other question
+// and the permission record of the session. A second DeleteRecord reports not
+// removed and no error.
+func TestDeleteRecord_QuestionRemovesOnlyThatFile(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, root, question("s1", "t1"))
+	mustWrite(t, root, question("s1", "t2"))
+	mustWrite(t, root, permission("s1"))
+
+	removed, err := DeleteRecord(root, KindQuestion, "s1", "t1")
+	if err != nil || !removed {
+		t.Fatalf("DeleteRecord = (%v, %v), want (true, nil)", removed, err)
+	}
+	assertFiles(t, root, "s1-permission.json", "s1-t2.json")
+
+	removed, err = DeleteRecord(root, KindQuestion, "s1", "t1")
+	if err != nil || removed {
+		t.Errorf("second DeleteRecord = (%v, %v), want (false, nil)", removed, err)
+	}
+	assertFiles(t, root, "s1-permission.json", "s1-t2.json")
+}
+
+// TestDeleteRecord_PermissionRemovesOnlyThatFile checks that a permission DeleteRecord
+// deletes "<sid>-permission.json" only, and ignores a tool-use ID.
+func TestDeleteRecord_PermissionRemovesOnlyThatFile(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, root, question("s1", "t1"))
+	mustWrite(t, root, permission("s1"))
+	mustWrite(t, root, permission("s2"))
+
+	removed, err := DeleteRecord(root, KindPermission, "s1", "ignored")
+	if err != nil || !removed {
+		t.Fatalf("DeleteRecord = (%v, %v), want (true, nil)", removed, err)
+	}
+	assertFiles(t, root, "s1-t1.json", "s2-permission.json")
+}
+
+// TestDeleteRecord_MissingRecord checks that a missing file, and a missing folder,
+// give removed false and no error.
+func TestDeleteRecord_MissingRecord(t *testing.T) {
+	root := t.TempDir()
+	for _, kind := range []string{KindQuestion, KindPermission} {
+		removed, err := DeleteRecord(root, kind, "s1", "t1")
+		if err != nil || removed {
+			t.Errorf("DeleteRecord(%s) with no folder = (%v, %v), want (false, nil)", kind, removed, err)
+		}
+	}
+	mustWrite(t, root, question("s2", "t9"))
+	for _, kind := range []string{KindQuestion, KindPermission} {
+		removed, err := DeleteRecord(root, kind, "s1", "t1")
+		if err != nil || removed {
+			t.Errorf("DeleteRecord(%s) with no file = (%v, %v), want (false, nil)", kind, removed, err)
+		}
+	}
+	assertFiles(t, root, "s2-t9.json")
+}
+
+// TestDeleteRecord_SanitizesNames checks that a "/" in the session ID and in the
+// tool-use ID maps to '-' in the file name, so DeleteRecord deletes the file that
+// Write made and never leaves the attention folder.
+func TestDeleteRecord_SanitizesNames(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, root, question("a/b", "t/1"))
+	mustWrite(t, root, permission("a/b"))
+	outside := filepath.Join(filepath.Dir(Dir(root)), "keep.json")
+	if err := os.WriteFile(outside, []byte("{}"), 0644); err != nil {
+		t.Fatalf("write outside file: %v", err)
+	}
+	assertFiles(t, root, "a-b-permission.json", "a-b-t-1.json")
+
+	removed, err := DeleteRecord(root, KindQuestion, "a/b", "t/1")
+	if err != nil || !removed {
+		t.Fatalf("DeleteRecord question = (%v, %v), want (true, nil)", removed, err)
+	}
+	if _, err := os.Stat(filepath.Join(Dir(root), "a-b-t-1.json")); !os.IsNotExist(err) {
+		t.Errorf("a-b-t-1.json must be gone, Stat error = %v", err)
+	}
+	assertFiles(t, root, "a-b-permission.json")
+
+	removed, err = DeleteRecord(root, KindPermission, "a/b", "")
+	if err != nil || !removed {
+		t.Fatalf("DeleteRecord permission = (%v, %v), want (true, nil)", removed, err)
+	}
+	assertFiles(t, root)
+
+	// A climbing session ID cannot reach a file outside the folder.
+	removed, err = DeleteRecord(root, KindQuestion, "..", "keep")
+	if err != nil || removed {
+		t.Errorf("DeleteRecord(\"..\") = (%v, %v), want (false, nil)", removed, err)
+	}
+	if _, err := os.Stat(outside); err != nil {
+		t.Errorf("the file outside the folder must stay: %v", err)
+	}
+}
+
+// TestDeleteRecord_RemoveError checks that DeleteRecord returns a remove error that is not
+// "file missing", here a non-empty directory at the record path, and reports
+// removed false.
+func TestDeleteRecord_RemoveError(t *testing.T) {
+	root := t.TempDir()
+	qPath := filepath.Join(Dir(root), "s1-t1.json")
+	pPath := filepath.Join(Dir(root), "s1-permission.json")
+	makeNonEmptyDir(t, qPath)
+	makeNonEmptyDir(t, pPath)
+
+	for _, tc := range []struct{ kind, path string }{
+		{KindQuestion, qPath},
+		{KindPermission, pPath},
+	} {
+		removed, err := DeleteRecord(root, tc.kind, "s1", "t1")
+		if err == nil || removed {
+			t.Fatalf("DeleteRecord(%s) = (%v, %v), want (false, remove error)", tc.kind, removed, err)
+		}
+		if !strings.Contains(err.Error(), tc.path) {
+			t.Errorf("error = %q, want it to name %s", err, tc.path)
+		}
+		if _, statErr := os.Stat(tc.path); statErr != nil {
+			t.Errorf("the entry at %s must stay: %v", tc.path, statErr)
+		}
+	}
+}
+
+// TestDeleteRecord_InputErrors checks that DeleteRecord rejects an unknown kind, an empty
+// session ID, and a question with no tool-use ID, and deletes nothing.
+func TestDeleteRecord_InputErrors(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, root, question("s1", "t1"))
+	mustWrite(t, root, permission("s1"))
+
+	cases := []struct{ name, kind, sid, tool string }{
+		{"unknown kind", "other", "s1", "t1"},
+		{"empty kind", "", "s1", "t1"},
+		{"empty session ID", KindQuestion, "", "t1"},
+		{"empty permission session ID", KindPermission, "", ""},
+		{"question without tool-use ID", KindQuestion, "s1", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			removed, err := DeleteRecord(root, tc.kind, tc.sid, tc.tool)
+			if err == nil || removed {
+				t.Errorf("DeleteRecord = (%v, %v), want (false, error)", removed, err)
+			}
+			assertFiles(t, root, "s1-permission.json", "s1-t1.json")
+		})
+	}
+}
+
 // TestDeleteSession checks that DeleteSession removes every record of one
 // session and keeps the records of other sessions.
 func TestDeleteSession(t *testing.T) {

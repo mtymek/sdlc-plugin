@@ -106,7 +106,8 @@
             "type": "string"
           },
           "condition": {
-            "type": "string"
+            "type": "string",
+            "description": "Display label of a conditional step. Only the presence of the key matters: a pending entry with a condition key does not block later steps or the cleanup contract check, whatever the text. ship_prepare sets it on the received-review entry that it seeds after review. The legacy ship_state init scaffold sets it on received-review and commit-fixes, with other texts."
           },
           "reason": {
             "type": "string"

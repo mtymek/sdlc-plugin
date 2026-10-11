@@ -184,7 +184,9 @@ describe('page logic exports', () => {
 
   test('view.js exports the request builders and the detail lookup', () => {
     ['archiveRequest', 'clearRequest', 'learningUrl', 'detailKey', 'detailItem',
-      'deleteRequest', 'deleteResultText', 'deletePrompt', 'deleteKeyFromDataset'].forEach((name) => {
+      'deleteRequest', 'deleteResultText', 'deletePrompt', 'deleteKeyFromDataset',
+      'preplanStatusRequest', 'historyDeleteRequest', 'historyPicksByRepo', 'pairedShipCount',
+      'historyDeleteQuestion', 'waitDismissRequest'].forEach((name) => {
       assert.equal(typeof view[name], 'function', name);
     });
   });
@@ -364,6 +366,24 @@ describe('sortHistory', () => {
     const noTotal = [{ id: 'x', totalMs: -1 }, { id: 'y' }, { id: 'z', totalMs: 10 }];
     assert.deepEqual(ids(view.sortHistory(noTotal, { key: 'total', dir: 'desc' })), ['z', 'x', 'y']);
     assert.deepEqual(ids(view.sortHistory(noTotal, { key: 'total', dir: 'asc' })), ['z', 'x', 'y']);
+  });
+
+  test('plan and ship: the first click sorts longest first, the second shortest first, empty rows last', () => {
+    const timed = [
+      { id: 'p1', kind: 'plan', durationMs: 26000, totalMs: 26000 },
+      { id: 's1', kind: 'ship', durationMs: 3600000, planDurationMs: 1200000, totalMs: 6000000 },
+      { id: 'x', kind: 'execute', durationMs: 50000, totalMs: 50000 },
+      { id: 's2', kind: 'ship', durationMs: 60000, totalMs: 60000 },
+    ];
+    const first = view.nextHistorySort(null, 'plan');
+    assert.deepEqual(first, { key: 'plan', dir: 'desc' });
+    assert.deepEqual(ids(view.sortHistory(timed, first)), ['s1', 'p1', 'x', 's2']);
+    const second = view.nextHistorySort(first, 'plan');
+    assert.deepEqual(second, { key: 'plan', dir: 'asc' });
+    assert.deepEqual(ids(view.sortHistory(timed, second)), ['p1', 's1', 'x', 's2']);
+    const ship = view.nextHistorySort(null, 'ship');
+    assert.deepEqual(ids(view.sortHistory(timed, ship)), ['s1', 's2', 'p1', 'x']);
+    assert.deepEqual(ids(view.sortHistory(timed, view.nextHistorySort(ship, 'ship'))), ['s2', 's1', 'p1', 'x']);
   });
 });
 
@@ -932,6 +952,18 @@ describe('scopedCounts / headerCounts', () => {
     assert.deepEqual(view.headerCounts(waitingRepos), { running: 3, stalled: 0, failed: 1, waiting: 2 });
   });
 
+  test('headerCounts waiting adds the lone waits of every repo, also a repo that has no pipeline', () => {
+    const lone = { kind: 'question', sessionId: 's1', toolUseId: 'toolu_1', askedAt: '2026-10-08T10:00:00Z' };
+    const attention = { kind: 'question', askedAt: '2026-10-08T10:00:00Z', header: 'Q', text: 't' };
+    const mixed = [
+      { root: '/a', pipelines: [{ status: 'running', attention }], loneWaits: [lone, lone] },
+      { root: '/b', pipelines: [], loneWaits: [lone] },
+      { root: '/c', pipelines: [{ status: 'failed' }], loneWaits: [] },
+      { root: '/d' },
+    ];
+    assert.deepEqual(view.headerCounts(mixed), { running: 1, stalled: 0, failed: 1, waiting: 4 });
+  });
+
   test('headerCounts ignores a status that is not running, stalled, or failed', () => {
     const odd = [{ root: '/a', pipelines: [{ status: 'waiting' }, { status: 'completed' }, { status: 'constructor' }] }];
     assert.deepEqual(view.headerCounts(odd), { running: 0, stalled: 0, failed: 0, waiting: 0 });
@@ -953,6 +985,18 @@ describe('pageTitle', () => {
 
   test('counts only the repos it is given', () => {
     assert.equal(view.pageTitle('SDLC dashboard', [repoA]), '(1) SDLC dashboard');
+  });
+
+  test('adds the lone waits of the repos it is given to the count', () => {
+    const lone = { kind: 'permission', sessionId: 's1', toolUseId: '', askedAt: '2026-10-08T10:00:00Z' };
+    const repoC = { root: '/c', pipelines: [], loneWaits: [lone, lone] };
+    assert.equal(view.pageTitle('SDLC dashboard', [repoC]), '(2) SDLC dashboard');
+    assert.equal(view.pageTitle('SDLC dashboard', [repoA, repoC]), '(3) SDLC dashboard');
+    assert.equal(view.pageTitle('SDLC dashboard', [repoA]), '(1) SDLC dashboard');
+  });
+
+  test('a repo with an empty loneWaits list adds nothing', () => {
+    assert.equal(view.pageTitle('SDLC dashboard', [{ root: '/e', pipelines: [], loneWaits: [] }]), 'SDLC dashboard');
   });
 
   test('returns the base title when no run waits', () => {
@@ -2603,6 +2647,160 @@ describe('render attentionRows', () => {
   });
 });
 
+describe('render loneWaitCard', () => {
+  const LONE_REPO = { root: '/src/payments', name: 'payments-service' };
+  const QUESTION = {
+    kind: 'question',
+    sessionId: 'sess-1',
+    toolUseId: 'toolu_01',
+    branch: 'main',
+    header: 'Next step',
+    text: 'Which retry strategy?',
+    askedAt: '2026-10-08T14:00:00Z',
+  };
+  const PERMISSION = {
+    kind: 'permission',
+    sessionId: 'sess-2',
+    toolUseId: '',
+    branch: 'fix/refund-rounding',
+    header: 'Permission',
+    text: 'Claude needs your permission to use Bash',
+    askedAt: '2026-10-08T14:00:00Z',
+  };
+  const draw = (wait, now) => render.loneWaitCard(fakeDoc(), view, LONE_REPO, wait, now === undefined ? NOW_WAIT : now);
+
+  test('the card is an article with the classes of a waiting block and data-lone-wait set to sessionId|toolUseId', () => {
+    const card = draw(QUESTION);
+    assert.equal(card.tagName, 'article');
+    assert.deepEqual(classesOf(card), ['pipe-block', 'attn', 'lone-wait']);
+    assert.equal(card.attrs['data-lone-wait'], 'sess-1|toolu_01');
+  });
+
+  test('a permission wait has an empty part after the pipe in data-lone-wait', () => {
+    assert.equal(draw(PERMISSION).attrs['data-lone-wait'], 'sess-2|');
+  });
+
+  test('the banner comes first: the bar with the wait age, then the header and the quoted text', () => {
+    const card = draw(QUESTION);
+    assert.equal(card.children[0].className, 'attn-bar');
+    assert.equal(textOf(card.children[0]), '◈ WAITING ON YOU · 4m 12s');
+    assert.equal(card.children[1].className, 'attn-text');
+    assert.equal(card.children[1].textContent, 'Next step: "Which retry strategy?"');
+    assert.equal(card.children[2].tagName, 'header');
+  });
+
+  test('the age keeps the question time in data-asked, so the timer can refresh it', () => {
+    const elapsed = oneByClass(draw(QUESTION), 'attn-elapsed');
+    assert.equal(elapsed.attrs['data-asked'], '2026-10-08T14:00:00Z');
+    assert.equal(elapsed.textContent, '4m 12s');
+  });
+
+  test('without a now argument the age counts to the current time', () => {
+    const asked = new Date(Date.now() - 5 * 60000).toISOString();
+    const card = render.loneWaitCard(fakeDoc(), view, LONE_REPO, Object.assign({}, QUESTION, { askedAt: asked }));
+    assert.match(oneByClass(card, 'attn-elapsed').textContent, /^5m \d+s$/);
+  });
+
+  test('a bad askedAt gives an empty age and the card still draws', () => {
+    const card = draw(Object.assign({}, QUESTION, { askedAt: 'bad' }));
+    assert.equal(oneByClass(card, 'attn-elapsed').textContent, '');
+    assert.equal(byClass(card, 'wait-dismiss').length, 1);
+  });
+
+  test('the head shows the lamp, the wait kind, the branch, the repo name and the Dismiss button', () => {
+    const head = oneByClass(draw(PERMISSION), 'pipe-head');
+    assert.equal(head.tagName, 'header');
+    assert.deepEqual(classesOf(head.children[0]), ['lamp', 'running', 'waiting']);
+    assert.equal(head.children[0].attrs['aria-hidden'], 'true');
+    assert.equal(head.children[1].className, 'pipe-kind');
+    assert.equal(head.children[1].textContent, 'permission');
+    assert.equal(head.children[2].tagName, 'h2');
+    assert.equal(head.children[2].className, 'pipe-branch');
+    assert.equal(head.children[2].textContent, 'fix/refund-rounding');
+    assert.equal(head.children[2].attrs.title, 'fix/refund-rounding');
+    const side = head.children[3];
+    assert.equal(side.className, 'pipe-side');
+    assert.equal(side.children[0].className, 'pipe-repo');
+    assert.equal(side.children[0].textContent, 'payments-service');
+    assert.equal(side.children[0].attrs.title, '/src/payments');
+    assert.equal(side.children[1].className, 'wait-dismiss');
+  });
+
+  test('a wait with no branch has no branch heading', () => {
+    const card = draw(Object.assign({}, QUESTION, { branch: '' }));
+    assert.equal(byClass(card, 'pipe-branch').length, 0);
+    assert.equal(byClass(card, 'wait-dismiss').length, 1);
+  });
+
+  test('Dismiss is a button with data-wait-dismiss, data-wait-kind and data-repo', () => {
+    const button = oneByClass(draw(QUESTION), 'wait-dismiss');
+    assert.equal(button.tagName, 'button');
+    assert.equal(button.textContent, 'Dismiss');
+    assert.equal(button.attrs.type, 'button');
+    assert.equal(button.attrs['data-wait-dismiss'], 'sess-1|toolu_01');
+    assert.equal(button.attrs['data-wait-kind'], 'question');
+    assert.equal(button.attrs['data-repo'], '/src/payments');
+  });
+
+  test('Dismiss of a permission wait has an empty toolUseId in its key and kind permission', () => {
+    const button = oneByClass(draw(PERMISSION), 'wait-dismiss');
+    assert.equal(button.attrs['data-wait-dismiss'], 'sess-2|');
+    assert.equal(button.attrs['data-wait-kind'], 'permission');
+  });
+
+  test('the key of Dismiss splits back into the sessionId and the toolUseId of the request', () => {
+    [QUESTION, PERMISSION].forEach((wait) => {
+      const key = oneByClass(draw(wait), 'wait-dismiss').attrs['data-wait-dismiss'];
+      const cut = key.indexOf('|');
+      assert.equal(key.slice(0, cut), wait.sessionId);
+      assert.equal(key.slice(cut + 1), wait.toolUseId);
+    });
+  });
+
+  test('the card has one button, and no fold button, station track or Archive button', () => {
+    const card = draw(QUESTION);
+    assert.equal(findAll(card, (n) => n.tagName === 'button').length, 1);
+    assert.equal(byClass(card, 'fold-btn').length, 0);
+    assert.equal(byClass(card, 'track').length, 0);
+    assert.equal(byClass(card, 'archive-btn').length, 0);
+    assert.equal(card.attrs['data-key'], undefined);
+  });
+
+  test('markup in the branch, header and text stays text', () => {
+    const card = draw(Object.assign({}, QUESTION, { branch: '<b>x</b>', header: '<i>h</i>', text: '<script>1</script>' }));
+    assert.equal(card.children[1].textContent, '<i>h</i>: "<script>1</script>"');
+    assert.equal(card.children[1].children.length, 0);
+    assert.equal(oneByClass(card, 'pipe-branch').textContent, '<b>x</b>');
+    assert.equal(oneByClass(card, 'pipe-branch').children.length, 0);
+    findAll(card, () => true).forEach((n) => {
+      ['innerHTML', 'outerHTML', 'insertAdjacentHTML'].forEach((sink) => {
+        assert.equal(sink in n, false, `${n.tagName} has ${sink}`);
+      });
+    });
+  });
+
+  test('the source of loneWaitCard writes no HTML string', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../static/render.js'), 'utf8');
+    const start = source.indexOf('function loneWaitCard(');
+    assert.ok(start > 0, 'render.js has no loneWaitCard');
+    const body = source.slice(start, source.indexOf('\n  }\n', start));
+    for (const sink of ['innerHTML', 'outerHTML', 'insertAdjacentHTML', 'document.write', 'createContextualFragment']) {
+      assert.ok(!body.includes(sink), `loneWaitCard uses ${sink}`);
+    }
+  });
+
+  test('tickElapsed rewrites the age of the card from data-asked', () => {
+    const card = draw(QUESTION);
+    const tickDoc = {
+      querySelectorAll(sel) { return sel === '.attn-elapsed' ? byClass(card, 'attn-elapsed') : []; },
+    };
+    // The fake nodes have no getAttribute; give them one for this check.
+    byClass(card, 'attn-elapsed').forEach((n) => { n.getAttribute = (k) => n.attrs[k]; });
+    render.tickElapsed(tickDoc, view, NOW_WAIT + 60000);
+    assert.equal(oneByClass(card, 'attn-elapsed').textContent, '5m 12s');
+  });
+});
+
 describe('render scopedTitle', () => {
   const BASE = 'SDLC dashboard';
   const waiting = { status: 'running', attention: ATTENTION };
@@ -2635,6 +2833,17 @@ describe('render scopedTitle', () => {
 
   test('no repo gives the base title', () => {
     assert.equal(render.scopedTitle(view, BASE, [], new Set(['/a'])), 'SDLC dashboard');
+  });
+
+  test('the lone waits of a repo outside the scope are not counted', () => {
+    const lone = { kind: 'question', sessionId: 's1', toolUseId: 'toolu_1', askedAt: '2026-10-08T10:00:00Z' };
+    const withLone = [
+      { root: '/a', pipelines: [], loneWaits: [lone, lone] },
+      { root: '/b', pipelines: [], loneWaits: [lone] },
+    ];
+    assert.equal(render.scopedTitle(view, BASE, withLone, new Set(['/a'])), '(2) SDLC dashboard');
+    assert.equal(render.scopedTitle(view, BASE, withLone, new Set(['/b'])), '(1) SDLC dashboard');
+    assert.equal(render.scopedTitle(view, BASE, withLone, new Set()), '(3) SDLC dashboard');
   });
 });
 
@@ -2959,8 +3168,12 @@ describe('render preplanPanel', () => {
     assert.equal(oneByClass(first, 'h-repo').attrs.title, '/b');
     assert.equal(oneByClass(first, 'h-when').attrs.title, '2026-10-08T10:00:00Z');
     assert.equal(oneByClass(first, 'h-when').textContent, view.dateLabel('2026-10-08T10:00:00Z'));
-    assert.equal(oneByClass(first, 'pp-status').className, 'pp-status pp-ready');
-    assert.equal(textOf(oneByClass(first, 'pp-status')), '●ready for plan');
+    assert.equal(oneByClass(first, 'pp-status').className, 'pp-status pp-set pp-ready');
+    // The tag holds the glyph and a status menu with the status of the file chosen.
+    assert.equal(oneByClass(first, 'pp-glyph').textContent, '●');
+    const menu = oneByClass(first, 'pp-menu');
+    assert.equal(menu.tagName, 'select');
+    assert.deepEqual(menu.children.filter((o) => o.selected).map((o) => o.value), ['ready for plan']);
   });
 
   test('status chips: all, then each status with its count; all is chosen by default', () => {
@@ -3014,8 +3227,11 @@ describe('render preplanPanel', () => {
     ] }];
     const panel = render.preplanPanel(fakeDoc(), view, odd, new Set());
     const tag = oneByClass(rowsOf(panel)[0], 'pp-status');
-    assert.equal(tag.className, 'pp-status pp-unknown');
-    assert.equal(textOf(tag), '?unknown');
+    assert.equal(tag.className, 'pp-status pp-set pp-unknown');
+    assert.equal(oneByClass(tag, 'pp-glyph').textContent, '?');
+    const options = oneByClass(tag, 'pp-menu').children;
+    assert.deepEqual(options.filter((o) => o.selected).map((o) => o.value), ['unknown']);
+    assert.equal(options[0].disabled, true);
     const chips = chipsOf(panel);
     assert.deepEqual(chips.map((c) => c.attrs['data-pp-status']), ['all', 'in progress', 'ready for plan', 'paused', 'unknown']);
     assert.equal(oneByClass(chips[4], 'chip-n').textContent, '1');
@@ -3265,6 +3481,315 @@ describe('deleteResultText', () => {
   });
 });
 
+// --- Status menu and History delete: requests, grouping, pairing, and question ---
+
+// The data-hist-pick key of a History row: repo root, kind, branch and end time.
+const histKey = (repo, kind, branch, endedAt) => [repo, kind, branch, endedAt].join('\n');
+
+describe('preplanStatusRequest', () => {
+  test('builds the POST to /api/preplan-status: token header, JSON type, and the repo, slug and status', () => {
+    const req = view.preplanStatusRequest('tok', '/r', 'zeta', 'paused');
+    assert.equal(req.method, 'POST');
+    assert.equal(req.url, '/api/preplan-status');
+    assert.equal(req.headers['X-Sdlc-Token'], 'tok');
+    assert.equal(req.headers['Content-Type'], 'application/json');
+    assert.deepEqual(JSON.parse(req.body), { repo: '/r', slug: 'zeta', status: 'paused' });
+  });
+
+  test('returns null for an empty token, repo, slug, or status', () => {
+    assert.equal(view.preplanStatusRequest('', '/r', 'zeta', 'paused'), null);
+    assert.equal(view.preplanStatusRequest('tok', '', 'zeta', 'paused'), null);
+    assert.equal(view.preplanStatusRequest('tok', '/r', '', 'paused'), null);
+    assert.equal(view.preplanStatusRequest('tok', '/r', 'zeta', ''), null);
+  });
+});
+
+describe('waitDismissRequest', () => {
+  const question = { kind: 'question', sessionId: 'sess-1', toolUseId: 'toolu_01', branch: 'main' };
+  const permission = { kind: 'permission', sessionId: 'sess-2', toolUseId: '', branch: 'main' };
+
+  test('builds the POST to /api/wait-dismiss: token header, JSON type, and the four body fields of the server', () => {
+    const req = view.waitDismissRequest('tok', '/r', question);
+    assert.equal(req.method, 'POST');
+    assert.equal(req.url, '/api/wait-dismiss');
+    assert.equal(req.headers['X-Sdlc-Token'], 'tok');
+    assert.equal(req.headers['Content-Type'], 'application/json');
+    assert.deepEqual(JSON.parse(req.body), { repo: '/r', kind: 'question', sessionId: 'sess-1', toolUseId: 'toolu_01' });
+  });
+
+  test('a permission wait sends an empty toolUseId', () => {
+    const req = view.waitDismissRequest('tok', '/r', permission);
+    assert.deepEqual(JSON.parse(req.body), { repo: '/r', kind: 'permission', sessionId: 'sess-2', toolUseId: '' });
+  });
+
+  test('a missing toolUseId is sent as an empty string', () => {
+    const req = view.waitDismissRequest('tok', '/r', { kind: 'permission', sessionId: 'sess-2' });
+    assert.equal(JSON.parse(req.body).toolUseId, '');
+  });
+
+  test('sends the four fields and nothing else', () => {
+    const req = view.waitDismissRequest('tok', '/r', Object.assign({ header: 'H', text: 'T', askedAt: 'A' }, question));
+    assert.deepEqual(Object.keys(JSON.parse(req.body)).sort(), ['kind', 'repo', 'sessionId', 'toolUseId']);
+  });
+
+  test('returns null for an empty token or repo, or a wait with no kind or sessionId', () => {
+    assert.equal(view.waitDismissRequest('', '/r', question), null);
+    assert.equal(view.waitDismissRequest('tok', '', question), null);
+    assert.equal(view.waitDismissRequest('tok', '/r', null), null);
+    assert.equal(view.waitDismissRequest('tok', '/r', undefined), null);
+    assert.equal(view.waitDismissRequest('tok', '/r', { kind: '', sessionId: 'sess-1', toolUseId: 'toolu_01' }), null);
+    assert.equal(view.waitDismissRequest('tok', '/r', { kind: 'question', sessionId: '', toolUseId: 'toolu_01' }), null);
+  });
+
+  test('the body field names are the JSON tags of waitDismissRequest in server.go', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../server.go'), 'utf8');
+    const block = source.match(/type waitDismissRequest struct \{([^}]*)\}/);
+    assert.ok(block, 'server.go has no waitDismissRequest struct');
+    const tags = [...block[1].matchAll(/json:"([A-Za-z]+)"/g)].map((m) => m[1]).sort();
+    const req = view.waitDismissRequest('tok', '/r', question);
+    assert.deepEqual(Object.keys(JSON.parse(req.body)).sort(), tags);
+  });
+});
+
+describe('historyDeleteRequest', () => {
+  test('builds the POST to /api/history-delete: token header, JSON type, the repo, and the rows', () => {
+    const rows = [
+      { kind: 'ship', branch: 'feat/a', endedAt: '2026-10-08T14:00:00Z' },
+      { kind: 'plan', branch: '', endedAt: '2026-10-08T10:00:00Z' },
+    ];
+    const req = view.historyDeleteRequest('tok', '/a', rows);
+    assert.equal(req.method, 'POST');
+    assert.equal(req.url, '/api/history-delete');
+    assert.equal(req.headers['X-Sdlc-Token'], 'tok');
+    assert.equal(req.headers['Content-Type'], 'application/json');
+    assert.deepEqual(JSON.parse(req.body), { repo: '/a', rows });
+  });
+
+  test('sends the three key fields of a row and nothing else', () => {
+    const req = view.historyDeleteRequest('tok', '/a', [{ kind: 'ship', branch: 'b', endedAt: 'T', repo: '/a', extra: 1 }]);
+    assert.deepEqual(JSON.parse(req.body).rows, [{ kind: 'ship', branch: 'b', endedAt: 'T' }]);
+  });
+
+  test('returns null for an empty token or repo, or for no rows', () => {
+    const rows = [{ kind: 'ship', branch: 'b', endedAt: 'T' }];
+    assert.equal(view.historyDeleteRequest('', '/a', rows), null);
+    assert.equal(view.historyDeleteRequest('tok', '', rows), null);
+    assert.equal(view.historyDeleteRequest('tok', '/a', []), null);
+    assert.equal(view.historyDeleteRequest('tok', '/a', null), null);
+  });
+});
+
+describe('historyPicksByRepo', () => {
+  test('gives one entry for each repo, in key order, with the rows of that repo', () => {
+    const keys = [
+      histKey('/a', 'ship', 'feat/a', 'T1'),
+      histKey('/b', 'execute', 'fix/b', 'T2'),
+      histKey('/a', 'plan', 'main', 'T3'),
+    ];
+    assert.deepEqual(view.historyPicksByRepo(keys), [
+      { repo: '/a', rows: [{ kind: 'ship', branch: 'feat/a', endedAt: 'T1' }, { kind: 'plan', branch: 'main', endedAt: 'T3' }] },
+      { repo: '/b', rows: [{ kind: 'execute', branch: 'fix/b', endedAt: 'T2' }] },
+    ]);
+  });
+
+  test('a repeated key adds one row', () => {
+    const key = histKey('/a', 'ship', 'feat/a', 'T1');
+    assert.deepEqual(view.historyPicksByRepo([key, key]), [{ repo: '/a', rows: [{ kind: 'ship', branch: 'feat/a', endedAt: 'T1' }] }]);
+  });
+
+  test('an empty branch stays an empty string', () => {
+    assert.deepEqual(view.historyPicksByRepo([histKey('/a', 'plan', '', 'T1')]),
+      [{ repo: '/a', rows: [{ kind: 'plan', branch: '', endedAt: 'T1' }] }]);
+  });
+
+  test('a key with no four parts adds nothing; no keys give no entry', () => {
+    assert.deepEqual(view.historyPicksByRepo(['/a\nship\nT1', '', null, 5]), []);
+    assert.deepEqual(view.historyPicksByRepo([]), []);
+    assert.deepEqual(view.historyPicksByRepo(null), []);
+  });
+});
+
+describe('pairedShipCount', () => {
+  const T_PLAN = '2026-10-08T10:00:00Z';
+  const T_SHIP = '2026-10-08T14:00:00Z';
+  const snapshot = { repos: [
+    { root: '/a', name: 'a', history: [
+      { kind: 'plan', branch: 'feat/a', endedAt: T_PLAN },
+      { kind: 'ship', branch: 'feat/a', endedAt: T_SHIP, planPaired: true, planEndedAt: T_PLAN },
+      // The same branch and plan time in another repo is another plan row.
+      { kind: 'plan', branch: 'feat/c', endedAt: '2026-10-07T10:00:00Z' },
+      { kind: 'ship', branch: 'feat/c', endedAt: '2026-10-07T12:00:00Z', planPaired: true, planEndedAt: '2026-10-07T10:00:00Z' },
+      { kind: 'ship', branch: 'other', endedAt: T_SHIP, planPaired: true, planEndedAt: T_PLAN },
+      { kind: 'ship', branch: 'feat/a', endedAt: '2026-10-09T14:00:00Z', planStartedAt: T_PLAN },
+    ] },
+    { root: '/b', name: 'b', history: [
+      { kind: 'ship', branch: 'feat/a', endedAt: T_SHIP, planPaired: true, planEndedAt: T_PLAN },
+    ] },
+  ] };
+  const planKey = histKey('/a', 'plan', 'feat/a', T_PLAN);
+  const shipKey = histKey('/a', 'ship', 'feat/a', T_SHIP);
+
+  test('a selected plan row counts the planPaired ship rows of its repo and branch with its end time', () => {
+    assert.equal(view.pairedShipCount(snapshot, [planKey]), 1);
+  });
+
+  test('a ship row that is selected too does not count', () => {
+    assert.equal(view.pairedShipCount(snapshot, [planKey, shipKey]), 0);
+  });
+
+  test('a selected ship row alone, and a row of another kind with the same branch and time, count nothing', () => {
+    assert.equal(view.pairedShipCount(snapshot, [shipKey]), 0);
+    assert.equal(view.pairedShipCount(snapshot, [histKey('/a', 'execute', 'feat/a', T_PLAN)]), 0);
+  });
+
+  test('two selected plan rows count the ship row of each', () => {
+    assert.equal(view.pairedShipCount(snapshot, [planKey, histKey('/a', 'plan', 'feat/c', '2026-10-07T10:00:00Z')]), 2);
+  });
+
+  test('a snapshot with no repos or history, and an empty selection, count 0', () => {
+    assert.equal(view.pairedShipCount(null, [planKey]), 0);
+    assert.equal(view.pairedShipCount({ repos: [{ root: '/a' }] }, [planKey]), 0);
+    assert.equal(view.pairedShipCount(snapshot, []), 0);
+  });
+});
+
+describe('historyDeleteQuestion', () => {
+  const ONE = 'Delete 1 run from the history?\nThis removes the rows from .sdlc-v2/history/runs.jsonl for good. The History tab and the run times lose them.';
+  const THREE = 'Delete 3 runs from the history?\nThis removes the rows from .sdlc-v2/history/runs.jsonl for good. The History tab and the run times lose them.';
+
+  test('1 run, no paired ship row: the draft text', () => {
+    assert.equal(view.historyDeleteQuestion(1, 0), ONE);
+  });
+
+  test('3 runs, no paired ship row: the draft text with the plural noun', () => {
+    assert.equal(view.historyDeleteQuestion(3, 0), THREE);
+  });
+
+  test('3 runs, 1 paired ship row: one more last line in the singular', () => {
+    assert.equal(view.historyDeleteQuestion(3, 1), THREE + '\n1 ship row loses its plan time.');
+  });
+
+  test('3 runs, 2 paired ship rows: one more last line in the plural', () => {
+    assert.equal(view.historyDeleteQuestion(3, 2), THREE + '\n2 ship rows lose their plan time.');
+  });
+});
+
+describe('render status menu and History pick controls', () => {
+  const T_PLAN = '2026-10-08T10:00:00Z';
+  const repos = [
+    { root: '/a', name: 'a', history: [
+      { kind: 'ship', branch: 'feat/a', outcome: 'success', endedAt: '2026-10-08T14:00:00Z', durationMs: 2460000,
+        planStartedAt: '2026-10-08T09:00:00Z', planDurationMs: 3600000, totalMs: 18000000, planPaired: true, planEndedAt: T_PLAN },
+      { kind: 'plan', branch: 'feat/a', outcome: 'done', endedAt: T_PLAN, durationMs: 3600000, totalMs: 3600000 },
+    ] },
+    { root: '/b', name: 'b', history: [
+      { kind: 'execute', branch: '', outcome: 'partial', endedAt: '2026-10-08T12:00:00Z', durationMs: 3720000, totalMs: 3720000 },
+    ] },
+  ];
+  const now = Date.parse('2026-10-08T14:30:00Z');
+  const rowsOf = (panel) => findAll(oneByClass(panel, 'hist'), (n) => n.tagName === 'tbody')[0].children;
+  const picksOf = (panel) => findAll(panel, (n) => 'data-hist-pick' in n.attrs);
+  const history = (ui) => render.historyTable(fakeDoc(), view, repos, new Set(), now, 'UTC', ui);
+
+  test('each History row has a checkbox whose data-hist-pick is the key: repo root, kind, branch, end time', () => {
+    const panel = history();
+    const boxes = picksOf(panel);
+    assert.deepEqual(boxes.map((b) => b.attrs['data-hist-pick']), [
+      histKey('/a', 'ship', 'feat/a', '2026-10-08T14:00:00Z'),
+      histKey('/b', 'execute', '', '2026-10-08T12:00:00Z'),
+      histKey('/a', 'plan', 'feat/a', T_PLAN),
+    ]);
+    for (const b of boxes) {
+      assert.equal(b.tagName, 'input');
+      assert.equal(b.attrs.type, 'checkbox');
+      assert.equal(b.className, 'hist-pick');
+    }
+  });
+
+  test('every key of a checkbox maps back to its row through historyPicksByRepo', () => {
+    const keys = picksOf(history()).map((b) => b.attrs['data-hist-pick']);
+    assert.deepEqual(view.historyPicksByRepo(keys), [
+      { repo: '/a', rows: [
+        { kind: 'ship', branch: 'feat/a', endedAt: '2026-10-08T14:00:00Z' },
+        { kind: 'plan', branch: 'feat/a', endedAt: T_PLAN },
+      ] },
+      { repo: '/b', rows: [{ kind: 'execute', branch: '', endedAt: '2026-10-08T12:00:00Z' }] },
+    ]);
+  });
+
+  test('the head holds the select-all box; with nothing picked the count text asks for rows and Delete is off', () => {
+    const panel = history();
+    const all = findAll(panel, (n) => 'data-hist-pick-all' in n.attrs);
+    assert.equal(all.length, 1);
+    assert.equal(all[0].className, 'hist-pick');
+    assert.equal(all[0].checked, false);
+    assert.equal(all[0].indeterminate, false);
+    assert.equal(textOf(oneByClass(panel, 'hist-picked')), 'Select rows to delete them');
+    const del = oneByClass(panel, 'hist-delete');
+    assert.equal(del.tagName, 'button');
+    assert.ok('data-hist-delete' in del.attrs);
+    assert.equal(del.disabled, true);
+  });
+
+  test('a picked row is checked and counted; select-all shows the middle state, then the full state', () => {
+    const ui = Object.assign(view.defaultUi(), { historyPicked: { [histKey('/a', 'plan', 'feat/a', T_PLAN)]: true } });
+    const panel = history(ui);
+    assert.deepEqual(picksOf(panel).map((b) => b.checked), [false, false, true]);
+    assert.equal(textOf(oneByClass(panel, 'hist-picked')), '1 selected');
+    assert.ok(!oneByClass(panel, 'hist-delete').disabled);
+    const all = findAll(panel, (n) => 'data-hist-pick-all' in n.attrs)[0];
+    assert.equal(all.checked, false);
+    assert.equal(all.indeterminate, true);
+    assert.deepEqual(rowsOf(panel).map((r) => r.className), ['', '', 'picked']);
+
+    const everyKey = picksOf(panel).map((b) => b.attrs['data-hist-pick']);
+    const full = history(Object.assign(view.defaultUi(), { historyPicked: Object.fromEntries(everyKey.map((k) => [k, true])) }));
+    const fullAll = findAll(full, (n) => 'data-hist-pick-all' in n.attrs)[0];
+    assert.equal(textOf(oneByClass(full, 'hist-picked')), '3 selected');
+    assert.equal(fullAll.checked, true);
+    assert.equal(fullAll.indeterminate, false);
+  });
+
+  test('ui.historyDeleted hides no row: the rows follow the snapshot', () => {
+    const ui = Object.assign(view.defaultUi(), {
+      historyDeleted: { [histKey('/a', 'plan', 'feat/a', T_PLAN)]: true },
+    });
+    assert.equal(rowsOf(history(ui)).length, 3);
+  });
+
+  const ppRepos = [{ root: '/a', name: 'a', preplans: [
+    { slug: 'zeta', topic: 'Zeta topic', status: 'in progress', path: '.sdlc-v2/preplan/zeta.md', updatedAt: '2026-10-08T10:00:00Z' },
+  ] }];
+
+  test('the status menu names its topic in data-pp-set and its repo in data-repo', () => {
+    const panel = render.preplanPanel(fakeDoc(), view, ppRepos, new Set());
+    const menu = oneByClass(panel, 'pp-menu');
+    assert.equal(menu.tagName, 'select');
+    assert.equal(menu.attrs['data-pp-set'], 'zeta');
+    assert.equal(menu.attrs['data-repo'], '/a');
+    assert.deepEqual(menu.children.map((o) => o.value), view.PREPLAN_STATUSES);
+  });
+
+  test('ui.preplanEdits changes no status: the menu shows the status of the snapshot', () => {
+    const ui = Object.assign(view.defaultUi(), { preplanEdits: { '/a\nzeta': 'paused' } });
+    const panel = render.preplanPanel(fakeDoc(), view, ppRepos, new Set(), ui);
+    const menu = oneByClass(panel, 'pp-menu');
+    assert.deepEqual(menu.children.filter((o) => o.selected).map((o) => o.value), ['in progress']);
+    const row = findAll(oneByClass(panel, 'pp'), (n) => n.tagName === 'tbody')[0].children[0];
+    assert.equal(oneByClass(row, 'pp-status').className, 'pp-status pp-set pp-progress');
+  });
+});
+
+describe('static files', () => {
+  test('no design-preview marker is left in the page files', () => {
+    const dir = path.join(__dirname, '../static');
+    for (const name of fs.readdirSync(dir).filter((n) => /\.(js|css|html)$/.test(n))) {
+      const text = fs.readFileSync(path.join(dir, name), 'utf8');
+      assert.doesNotMatch(text, /design preview|\(D[0-9]\)/i, name);
+    }
+  });
+});
+
 describe('deletePrompt', () => {
   const preplan = (status) => ({ kind: 'preplan', repo: '/r', key: { slug: 'a' }, label: 'A topic', path: '.sdlc-v2/preplan/a.md', status });
 
@@ -3472,8 +3997,11 @@ describe('render tiles from the shared fixture', () => {
   });
 
   test('a review dimensions tile: totals line above the rows, an amber count above 0', () => {
-    const p = fixturePipeline('sdlc-plugin', SHIP);
-    const t = tileByName(fixtureBlock('sdlc-plugin', SHIP), 'review');
+    // A review step with no review queue draws the dimensions tile.
+    const p = structuredClone(fixturePipeline('sdlc-plugin', SHIP));
+    delete stepOf(p, 'review').detail.reviewQueue;
+    const block = render.pipelineBlock(fakeDoc(), view, fixtureRepo('sdlc-plugin'), p, { collapsed: false, closed: {}, now: FIXTURE_NOW, tz: 'UTC' });
+    const t = tileByName(block, 'review');
     const body = t.children[1];
     assert.equal(body.children[0].className, 'round-sum');
     assert.equal(body.children[0].textContent, view.reviewTotalsText(stepOf(p, 'review').detail.reviewTotals));
@@ -4334,8 +4862,8 @@ describe('render rows and the detail lookup, over the fixture', () => {
     }
   });
 
-  test('the rows cover the four item kinds, and every key is different', () => {
-    assert.deepEqual([...new Set(keys.map((k) => k.split(':')[0]))].sort(), ['deferred', 'finding', 'issue', 'learning']);
+  test('the rows cover the five item kinds, and every key is different', () => {
+    assert.deepEqual([...new Set(keys.map((k) => k.split(':')[0]))].sort(), ['deferred', 'finding', 'issue', 'learning', 'queue-row']);
     assert.equal(new Set(keys).size, keys.length);
   });
 
@@ -4596,29 +5124,30 @@ describe('render historyTable', () => {
     assert.equal(textOf(oneByClass(panel, 'list-title')), 'Finished runs (3)');
     const table = oneByClass(panel, 'hist');
     assert.equal(table.tagName, 'table');
-    assert.deepEqual(heads(table), ['outcome', 'kind', 'branch', 'repo', 'finished', 'plan', 'ship', 'total']);
+    // The first head holds the select-all box and has no name.
+    assert.deepEqual(heads(table), ['', 'outcome', 'kind', 'branch', 'repo', 'finished', 'plan', 'ship', 'total']);
     const rows = rowsOf(panel);
     assert.deepEqual(rows.map((r) => oneByClass(r, 'out').className), ['out success', 'out partial', 'out failure']);
     assert.deepEqual(rows.map((r) => textOf(oneByClass(r, 'out'))), ['✓success', '◐partial', '✕failure']);
     assert.equal(oneByClass(rows[0], 'out').children[0].attrs['aria-hidden'], 'true');
-    assert.deepEqual(rows[1].children.slice(1).map((c) => c.textContent), [
+    assert.deepEqual(rows[1].children.slice(2).map((c) => c.textContent), [
       'execute', 'fix/b', 'b', view.relativeWhen('2026-10-08T12:00:00Z', now, 'UTC'), '—', '—', view.formatDuration(3720000),
     ]);
-    assert.deepEqual(rows[1].children.slice(4).map((c) => c.textContent), ['2h ago', '—', '—', '1h 02m']);
+    assert.deepEqual(rows[1].children.slice(5).map((c) => c.textContent), ['2h ago', '—', '—', '1h 02m']);
     assert.deepEqual(rows[0].children.map((c) => c.className),
-      ['', 'h-kind', 'h-branch', 'h-repo', 'h-when', 'h-dur', 'h-dur', 'h-dur']);
+      ['h-pick', '', 'h-kind', 'h-branch', 'h-repo', 'h-when', 'h-dur', 'h-dur', 'h-dur']);
   });
 
   test('the plan, ship and total cells follow the column table', () => {
     const rows = rowsOf(render.historyTable(fakeDoc(), view, repos, new Set(), now, 'UTC'));
     // ship row: plan from planDurationMs, ship from durationMs, total from totalMs.
-    assert.deepEqual(rows[0].children.slice(5).map((c) => c.textContent), ['22m', '41m', '2h 00m']);
+    assert.deepEqual(rows[0].children.slice(6).map((c) => c.textContent), ['22m', '41m', '2h 00m']);
     // plan row: plan from durationMs, no ship time.
-    assert.deepEqual(rows[2].children.slice(5).map((c) => c.textContent), ['26s', '—', '26s']);
+    assert.deepEqual(rows[2].children.slice(6).map((c) => c.textContent), ['26s', '—', '26s']);
   });
 
   // now → after row: History controls.
-  test('the controls: outcome chips, then finished and total sort buttons, none active at page load', () => {
+  test('the controls: outcome chips, then finished, plan, ship and total sort buttons, none active at page load', () => {
     const panel = render.historyTable(fakeDoc(), view, repos, new Set(), now, 'UTC');
     const bar = oneByClass(panel, 'hist-filter');
     assert.equal(bar.attrs.role, 'group');
@@ -4628,9 +5157,9 @@ describe('render historyTable', () => {
     assert.deepEqual(chips.map((c) => c.attrs['aria-pressed']), ['true', 'false', 'false', 'false']);
     for (const c of chips) assert.equal(c.attrs.type, 'button');
     const sorts = byClass(panel, 'sort-btn');
-    assert.deepEqual(sorts.map((b) => b.attrs['data-hist-sort']), ['finished', 'total']);
-    assert.deepEqual(sorts.map((b) => b.className), ['sort-btn', 'sort-btn']);
-    assert.deepEqual(byClass(panel, 'sortable').map((th) => th.attrs['aria-sort']), ['none', 'none']);
+    assert.deepEqual(sorts.map((b) => b.attrs['data-hist-sort']), ['finished', 'plan', 'ship', 'total']);
+    assert.deepEqual(sorts.map((b) => b.className), ['sort-btn', 'sort-btn', 'sort-btn', 'sort-btn']);
+    assert.deepEqual(byClass(panel, 'sortable').map((th) => th.attrs['aria-sort']), ['none', 'none', 'none', 'none']);
   });
 
   test('a chip filters the rows', () => {
@@ -4668,9 +5197,9 @@ describe('render historyTable', () => {
   test('an active sort control shows its order', () => {
     const ui = Object.assign(view.defaultUi(), { historySort: { key: 'total', dir: 'desc' } });
     const panel = render.historyTable(fakeDoc(), view, repos, new Set(), now, 'UTC', ui);
-    assert.deepEqual(byClass(panel, 'sort-btn').map((b) => b.className), ['sort-btn', 'sort-btn on']);
-    assert.deepEqual(byClass(panel, 'sortable').map((th) => th.attrs['aria-sort']), ['none', 'descending']);
-    assert.deepEqual(byClass(panel, 'sort-arrow').map((a) => a.textContent), ['↕', '▼']);
+    assert.deepEqual(byClass(panel, 'sort-btn').map((b) => b.className), ['sort-btn', 'sort-btn', 'sort-btn', 'sort-btn on']);
+    assert.deepEqual(byClass(panel, 'sortable').map((th) => th.attrs['aria-sort']), ['none', 'none', 'none', 'descending']);
+    assert.deepEqual(byClass(panel, 'sort-arrow').map((a) => a.textContent), ['↕', '↕', '↕', '▼']);
     assert.deepEqual(rowsOf(panel).map((r) => oneByClass(r, 'h-branch').textContent), ['feat/a', 'fix/b', 'main']);
   });
 
@@ -4686,7 +5215,7 @@ describe('render historyTable', () => {
     const panel = render.historyTable(fakeDoc(), view, fresh, new Set(), now, 'UTC', ui);
     const active = chipsOf(panel).filter((c) => c.attrs['aria-pressed'] === 'true');
     assert.deepEqual(active.map((c) => c.attrs['data-hist-outcome']), ['success']);
-    assert.deepEqual(byClass(panel, 'sortable').map((th) => th.attrs['aria-sort']), ['ascending', 'none']);
+    assert.deepEqual(byClass(panel, 'sortable').map((th) => th.attrs['aria-sort']), ['ascending', 'none', 'none', 'none']);
     assert.deepEqual(rowsOf(panel).map((r) => oneByClass(r, 'h-branch').textContent), ['feat/a', 'feat/new']);
   });
 
@@ -4710,6 +5239,228 @@ describe('render historyTable', () => {
     const outcomes = new Set(byClass(panel, 'out').map((n) => n.className.split(' ')[1]));
     assert.deepEqual([...outcomes].sort(), ['failure', 'partial', 'success']);
     assert.ok(new Set(byClass(panel, 'h-repo').map((n) => n.textContent)).size >= 2);
+  });
+});
+
+describe('render review queue tile', () => {
+  // A copy of the fixture ship run: each test changes its own copy.
+  const shipCopy = () => structuredClone(fixturePipeline('sdlc-plugin', SHIP));
+  const queueTile = (p) => {
+    const review = stepOf(p, 'review');
+    return render.stepTile(fakeDoc(), view, p, review, p.steps.indexOf(review), true, false);
+  };
+  const queueOf = (p) => stepOf(p, 'review').detail.reviewQueue;
+  const rowsOf = (t) => byClass(t, 'q-row');
+  const srcChips = (t) => findAll(t, (n) => 'data-q-src' in n.attrs);
+  const lines = (t) => byClass(t, 'generic-line').map((n) => n.textContent);
+
+  test('the tile reads detail.reviewQueue: threshold line, F of Q fixed, and the progress bar', () => {
+    const t = queueTile(shipCopy());
+    assert.equal(byClass(t, 'review-queue').length, 1);
+    assert.equal(byClass(t, 'dim-cols').length, 0);
+    assert.equal(textOf(oneByClass(t, 'q-threshold')), 'Fix threshold: low · findings below it go to the deferred list');
+    // 8 rows, 1 below the threshold: 7 qualify, 2 fixed.
+    const count = byClass(t, 'round-sum').find((n) => /^\d+ of \d+ fixed/.test(textOf(n)));
+    assert.match(textOf(count), /^2 of 7 fixed · 1 fixing · 1 queued · 1 failed · 1 deferred · 1 with no fix record · 1 below threshold$/);
+    const bar = oneByClass(t, 'fix-progress');
+    assert.equal(bar.attrs.max, '7');
+    assert.equal(bar.attrs.value, '2');
+  });
+
+  test('with a live run, the open rows read waiting for a fix', () => {
+    const p = shipCopy();
+    stepOf(p, 'review').detail.runLive = true;
+    const t = queueTile(p);
+    const count = byClass(t, 'round-sum').find((n) => /^\d+ of \d+ fixed/.test(textOf(n)));
+    assert.match(textOf(count), / · 1 waiting for a fix · /);
+    const open = rowsOf(t).map((r) => oneByClass(r, 'fix-status')).filter((n) => classesOf(n).includes('open'));
+    assert.deepEqual(open.map((n) => n.textContent), ['waiting']);
+  });
+
+  test('the rows follow the rank table, then severity; open and below rows get their status class', () => {
+    const t = queueTile(shipCopy());
+    const statuses = rowsOf(t).map((r) => oneByClass(r, 'fix-status').className);
+    assert.deepEqual(statuses, [
+      'fix-status fixing', 'fix-status queued', 'fix-status failed', 'fix-status open',
+      'fix-status deferred', 'fix-status fixed', 'fix-status fixed', 'fix-status below',
+    ]);
+    assert.deepEqual(rowsOf(t).map((r) => oneByClass(r, 'fix-status').textContent), [
+      'fixing', 'queued', 'failed', 'no record', 'deferred', 'fixed', 'fixed', 'below threshold',
+    ]);
+    // Two fixed rows: high before medium.
+    assert.deepEqual(rowsOf(t).slice(5, 7).map((r) => oneByClass(r, 'sev').textContent), ['high', 'medium']);
+    assert.equal(oneByClass(rowsOf(t)[0], 'fix-title').textContent, 'The snapshot endpoint has no Origin check');
+    const css = fs.readFileSync(path.join(__dirname, '../static/app.css'), 'utf8');
+    assert.match(css, /\.fix-status\.open \{[^}]*font-style: italic/);
+    assert.match(css, /\.q-row:has\(\.fix-status\.below\) \.fix-title \{/);
+  });
+
+  test('the PR comments and local review chips count and filter the rows by origin', () => {
+    const t = queueTile(shipCopy());
+    assert.deepEqual(srcChips(t).map((c) => [c.attrs['data-q-src'], oneByClass(c, 'chip-n').textContent]),
+      [['all', '8'], ['local', '7'], ['pr', '1']]);
+    const pick = (src) => {
+      const p = shipCopy();
+      stepOf(p, 'review').detail.queueFilter = { dim: 'all', src };
+      return queueTile(p);
+    };
+    const pr = pick('pr');
+    assert.deepEqual(rowsOf(pr).map((r) => oneByClass(r, 'fix-title').textContent), ['Test the queue when the review finds nothing']);
+    assert.equal(srcChips(pr).find((c) => c.attrs['data-q-src'] === 'pr').attrs['aria-pressed'], 'true');
+    assert.equal(rowsOf(pick('local')).length, 7);
+  });
+
+  test('the dimension chips count the rows of each dimension and filter by it', () => {
+    const p = shipCopy();
+    stepOf(p, 'review').detail.queueFilter = { dim: 'security', src: 'all' };
+    const t = queueTile(p);
+    const chips = findAll(t, (n) => 'data-q-dim' in n.attrs);
+    assert.deepEqual(chips.map((c) => [c.attrs['data-q-dim'], oneByClass(c, 'chip-n').textContent]),
+      [['all', '8'], ['correctness', '1'], ['security', '2'], ['docs', '1']]);
+    assert.equal(rowsOf(t).length, 2);
+  });
+
+  test('the clean count holds the dimensions with no findings, not the dimensions with no row', () => {
+    const p = shipCopy();
+    const detail = stepOf(p, 'review').detail;
+    const clean = detail.dimensions.filter((d) => !d.findings).length;
+    const label = (t) => byClass(t, 'q-clean').map((n) => n.textContent);
+    assert.deepEqual(label(queueTile(p)), ['+' + clean + ' clean']);
+    // A dimension with findings whose rows carry no dimension name is not clean.
+    detail.reviewQueue.rows.forEach((r) => { if (r.dimension === 'docs') r.dimension = ''; });
+    assert.deepEqual(label(queueTile(p)), ['+' + clean + ' clean']);
+  });
+
+  test('reason no-findings shows "No findings." one time', () => {
+    const p = shipCopy();
+    Object.assign(queueOf(p), { rows: [], unrouted: 0, reason: 'no-findings' });
+    const t = queueTile(p);
+    assert.deepEqual(lines(t).filter((s) => /No findings/.test(s)), ['No findings.']);
+    assert.equal(rowsOf(t).length, 0);
+  });
+
+  test('reason all-below-threshold shows the found count of the review totals', () => {
+    const p = shipCopy();
+    Object.assign(queueOf(p), { unrouted: 0, reason: 'all-below-threshold' });
+    queueOf(p).rows = queueOf(p).rows.map((r) => Object.assign(r, { status: 'below' }));
+    assert.ok(lines(queueTile(p)).includes('All 5 findings below threshold'));
+    stepOf(p, 'review').detail.reviewTotals.found = 1;
+    assert.ok(lines(queueTile(p)).includes('All 1 finding below threshold'));
+  });
+
+  test('unrouted above 0 shows the findings not routed yet; 0 shows no line', () => {
+    assert.ok(lines(queueTile(shipCopy())).includes('1 finding not routed yet'));
+    const many = shipCopy();
+    queueOf(many).unrouted = 3;
+    assert.ok(lines(queueTile(many)).includes('3 findings not routed yet'));
+    const p = shipCopy();
+    queueOf(p).unrouted = 0;
+    assert.equal(lines(queueTile(p)).filter((s) => /not routed/.test(s)).length, 0);
+  });
+
+  test('a queue row opens the queue-row item, and detailItem finds it again in a new snapshot', () => {
+    const p = shipCopy();
+    const row = rowsOf(queueTile(p))[0];
+    const key = row.attrs['data-detail'];
+    const index = queueOf(p).rows.findIndex((r) => r.status === 'fixing');
+    assert.equal(key, view.detailKey('queue-row', null, { pipeline: p.id, index }));
+    assert.equal(key, 'queue-row:' + p.id + ':' + index);
+    const item = view.detailItem(structuredClone(FIXTURE), key);
+    assert.equal(item.kind, 'queue-row');
+    assert.equal(item.title, 'high: internal/dashboard/web/server.go:201-208');
+    assert.equal(item.text, queueOf(p).rows[index].text);
+    assert.deepEqual(item.meta, [
+      ['Pipeline', p.id],
+      ['Title', 'The snapshot endpoint has no Origin check'],
+      ['Status', 'fixing'],
+      ['Origin', 'local-review'],
+      ['Dimension', 'security'],
+    ]);
+    assert.equal(view.detailKey('queue-row', null, { index: 0 }), '');
+  });
+
+  test('a received-review step with no detail has no tile, no section button, and no tile count', () => {
+    const p = shipCopy();
+    const before = view.tileCount(p, null);
+    // The page drops this detail when the review step has a queue.
+    delete stepOf(p, 'received-review').detail;
+    assert.equal(view.tileCount(p, null), before - 1);
+    const block = render.pipelineBlock(fakeDoc(), view, fixtureRepo('sdlc-plugin'), p, { collapsed: false, closed: {}, now: FIXTURE_NOW, tz: 'UTC' });
+    assert.equal(tileByName(block, 'received-review'), undefined);
+    const station = byClass(block, 'station').find((n) => /^received-review/.test(n.attrs.title || ''));
+    assert.ok(station);
+    assert.equal(station.tagName, 'div');
+  });
+});
+
+describe('wait display from the shared fixture', () => {
+  const payments = () => fixtureRepo('payments-service');
+
+  test('payments-service has one question wait and one permission wait', () => {
+    assert.deepEqual(payments().loneWaits.map((w) => w.kind), ['question', 'permission']);
+  });
+
+  test('each lone wait draws a card with its kind, header, text, branch and age', () => {
+    payments().loneWaits.forEach((wait) => {
+      const card = render.loneWaitCard(fakeDoc(), view, payments(), wait, FIXTURE_NOW);
+      assert.equal(card.attrs['data-lone-wait'], wait.sessionId + '|' + wait.toolUseId);
+      assert.equal(oneByClass(card, 'pipe-kind').textContent, wait.kind);
+      assert.equal(oneByClass(card, 'pipe-branch').textContent, wait.branch);
+      assert.equal(oneByClass(card, 'attn-text').textContent, wait.header + ': "' + wait.text + '"');
+      const age = render.elapsedText(view, wait.askedAt, FIXTURE_NOW);
+      assert.notEqual(age, '');
+      assert.equal(oneByClass(card, 'attn-elapsed').textContent, age);
+      const button = oneByClass(card, 'wait-dismiss');
+      assert.equal(button.attrs['data-wait-kind'], wait.kind);
+      assert.equal(button.attrs['data-repo'], payments().root);
+    });
+  });
+
+  test('the Dismiss key of a fixture wait builds the request the server reads', () => {
+    payments().loneWaits.forEach((wait) => {
+      const card = render.loneWaitCard(fakeDoc(), view, payments(), wait, FIXTURE_NOW);
+      const button = oneByClass(card, 'wait-dismiss');
+      const key = button.attrs['data-wait-dismiss'];
+      const cut = key.indexOf('|');
+      const req = view.waitDismissRequest('tok', button.attrs['data-repo'], {
+        kind: button.attrs['data-wait-kind'],
+        sessionId: key.slice(0, cut),
+        toolUseId: key.slice(cut + 1),
+      });
+      assert.deepEqual(JSON.parse(req.body), {
+        repo: payments().root,
+        kind: wait.kind,
+        sessionId: wait.sessionId,
+        toolUseId: wait.toolUseId,
+      });
+    });
+  });
+
+  test('the running plan with attention of identity-service shows the wait banner', () => {
+    const block = fixtureBlock('identity-service', (p) => !!p.attention);
+    assert.equal(block.children[0].className, 'attn-bar');
+    assert.ok(classesOf(block).includes('attn'));
+  });
+
+  test('that plan run is first in the feed order of every pipeline', () => {
+    const all = [];
+    FIXTURE.repos.forEach((r) => (r.pipelines || []).forEach((p) => all.push(p)));
+    const first = view.feedOrder(all)[0];
+    assert.equal(first, fixturePipeline('identity-service', (p) => !!p.attention));
+    assert.equal(first.kind, 'plan');
+  });
+
+  test('the header waiting count adds the lone waits to the runs with attention', () => {
+    const runs = FIXTURE.repos.reduce((n, r) => n + (r.pipelines || []).filter((p) => p.attention).length, 0);
+    const lone = FIXTURE.repos.reduce((n, r) => n + (r.loneWaits || []).length, 0);
+    assert.equal(lone, 2);
+    assert.equal(view.headerCounts(FIXTURE.repos).waiting, runs + lone);
+  });
+
+  test('the tab title counts the lone waits only of the repos in scope', () => {
+    const base = 'SDLC dashboard';
+    assert.equal(render.scopedTitle(view, base, FIXTURE.repos, new Set([payments().root])), '(2) ' + base);
+    assert.equal(render.scopedTitle(view, base, FIXTURE.repos, new Set([fixtureRepo('identity-service').root])), '(1) ' + base);
   });
 });
 
@@ -4752,6 +5503,7 @@ describe('render.js browser global fallback', () => {
       'headerTotals',
       'historyTable',
       'issuesTile',
+      'loneWaitCard',
       'packDimensionGrid',
       'pipelineBlock',
       'preplanPanel',
