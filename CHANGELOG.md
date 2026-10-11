@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.4.3] - 2026-10-11
+
+### RC 1
+
+- Dashboard shows plan runs that wait for an answer, and lone waits with a Dismiss button.
+- Dashboard review queue tile shows threshold, fix status and fix origin of each review finding.
+- History rows get plan time pairing, new sort keys and a Delete selected action.
+- Preplans tab gets a status menu for each topic.
+- Ship records the received-review step, also with 0 fixes.
+
 ## [0.4.2] - 2026-10-10
 
 ### RC 1
