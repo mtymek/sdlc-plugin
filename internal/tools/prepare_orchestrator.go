@@ -4,7 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 
+	"github.com/rnagrodzki/sdlc-plugin/internal/fsx"
+	"github.com/rnagrodzki/sdlc-plugin/internal/ghx"
 	"github.com/rnagrodzki/sdlc-plugin/internal/history"
 	"github.com/rnagrodzki/sdlc-plugin/internal/mcpserver"
 	"github.com/rnagrodzki/sdlc-plugin/internal/paths"
@@ -83,6 +86,11 @@ type PrepareOrchestratorIn struct {
 	// includes recent run records and open deferred issues as additional
 	// evidence for hardening proposals.
 	HistoryPath string `json:"historyPath,omitempty" jsonschema_description:"Harden mode only. Path to .sdlc-v2/history/. When set, the manifest includes recent run records and open deferred issues as additional evidence for hardening proposals."`
+
+	// catalog lists the registered MCP tools. It is unexported, so it is not
+	// in the input schema; the handler sets it to the server at call time, and
+	// toHardenPrepareIn copies it for the dead-reference scan.
+	catalog toolCatalog
 }
 
 // PrepareOrchestratorOut is prepare_orchestrator's output: the path to the
@@ -90,13 +98,22 @@ type PrepareOrchestratorIn struct {
 // tools already did), plus the Mode that was actually run.
 //
 // CustomInstructions is set in harden mode only. It is the same map that the
-// manifest file carries under customInstructions. Next is the step after the
-// call, in both modes.
+// manifest file carries under customInstructions. PreflightFindingCount is the
+// number of pre-flight findings in the harden manifest (0 in error_report
+// mode). Next is the step after the call, in both modes.
+//
+// SimilarIssues is set in error_report mode only. It holds the open issues
+// whose title starts with "[<skill>]": a pointer to an empty slice when no
+// issue matches or the search was skipped, and nil (so the key is absent) in
+// harden mode. SimilarIssuesNote says why the search was skipped.
 type PrepareOrchestratorOut struct {
-	ManifestPath       string              `json:"manifestPath"`
-	Mode               string              `json:"mode"`
-	CustomInstructions map[string][]string `json:"customInstructions,omitempty"` // harden mode only
-	Next               string              `json:"next"`                         // no omitempty: guardrail mcp-output-drives-behavior
+	ManifestPath          string              `json:"manifestPath"`
+	Mode                  string              `json:"mode"`
+	CustomInstructions    map[string][]string `json:"customInstructions,omitempty"` // harden mode only
+	PreflightFindingCount int                 `json:"preflightFindingCount"`        // harden mode only; 0 in error_report mode
+	SimilarIssues         *[]ghx.Issue        `json:"similarIssues,omitempty"`      // error_report mode only; [] when no match
+	SimilarIssuesNote     string              `json:"similarIssuesNote,omitempty"`  // error_report mode only; set when the search was skipped
+	Next                  string              `json:"next"`                         // no omitempty: guardrail mcp-output-drives-behavior
 }
 
 // prepareNextHarden is the Next text that prepare_orchestrator returns in
@@ -106,6 +123,57 @@ const prepareNextHarden = "Print customInstructions as the harden instruction bl
 // prepareNextErrorReport is the Next text that prepare_orchestrator returns in
 // error_report mode.
 const prepareNextErrorReport = "Dispatch sdlc:error-report-orchestrator with manifestPath."
+
+// hardenOutToPrepareOut copies every HardenPrepareOut field that a skill reads
+// into the prepare_orchestrator output. When the manifest holds pre-flight
+// findings, Next also says that the harden orchestrator drafts their repair
+// proposals first.
+func hardenOutToPrepareOut(out HardenPrepareOut, mode string) PrepareOrchestratorOut {
+	next := prepareNextHarden
+	if out.PreflightFindingCount > 0 {
+		next += fmt.Sprintf(" %d pre-flight findings: the harden orchestrator drafts repair proposals for them first.", out.PreflightFindingCount)
+	}
+	if len(out.DeadReferenceSkips) > 0 {
+		next += " Dead-reference check skipped: " + strings.Join(out.DeadReferenceSkips, "; ") + "."
+	}
+	return PrepareOrchestratorOut{
+		ManifestPath:          out.ManifestPath,
+		Mode:                  mode,
+		CustomInstructions:    out.CustomInstructions,
+		PreflightFindingCount: out.PreflightFindingCount,
+		Next:                  next,
+	}
+}
+
+// errorReportOutToPrepareOut copies every ErrorReportPrepareOut field that a
+// skill reads into the prepare_orchestrator output. SimilarIssues is always
+// set (to [] when nothing matches or when the search was skipped). Next keeps
+// the base text for a search that ran and found nothing. When SimilarIssues
+// holds issues, Next also says that the error-report skill offers them before
+// a new issue. When the search was skipped, Next ends with the skip note, so a
+// skipped search does not read as "no match".
+func errorReportOutToPrepareOut(out ErrorReportPrepareOut, mode string) PrepareOrchestratorOut {
+	similar := out.SimilarIssues
+	if similar == nil {
+		similar = []ghx.Issue{}
+	}
+	next := prepareNextErrorReport
+	if len(similar) > 0 {
+		next += fmt.Sprintf(" After Step 6, Step 6b offers the %d similar open issue(s) before a new issue.", len(similar))
+	}
+	if note := out.SimilarIssuesNote; note != "" {
+		// The note starts with a lowercase word; the sentence in Next starts
+		// with a capital letter.
+		next += " " + strings.ToUpper(note[:1]) + note[1:]
+	}
+	return PrepareOrchestratorOut{
+		ManifestPath:      out.ManifestPath,
+		Mode:              mode,
+		SimilarIssues:     &similar,
+		SimilarIssuesNote: out.SimilarIssuesNote,
+		Next:              next,
+	}
+}
 
 // ---------------------------------------------------------------------------
 // Field mapping (pure, unit-testable in isolation from worktree/filesystem
@@ -126,6 +194,7 @@ func toHardenPrepareIn(in PrepareOrchestratorIn) HardenPrepareIn {
 		ArgsString:      in.ArgsString,
 		FromIssue:       in.FromIssue,
 		SkipConfigCheck: in.SkipConfigCheck,
+		catalog:         in.catalog,
 	}
 }
 
@@ -183,18 +252,12 @@ func prepareOrchestrator(in PrepareOrchestratorIn) (PrepareOrchestratorOut, erro
 		if histPath == "" {
 			histPath = paths.HistoryDir(root)
 		}
-		if err := injectHardenHistory(out.ManifestPath, histPath); err != nil {
-			// Non-fatal — history is supplementary evidence; log as
-			// manifest error but don't block the harden run.
-			_ = err
-		}
-
-		return PrepareOrchestratorOut{
-			ManifestPath:       out.ManifestPath,
-			Mode:               in.Mode,
-			CustomInstructions: out.CustomInstructions,
-			Next:               prepareNextHarden,
-		}, nil
+		// Non-fatal: history is extra evidence, so a failure does not block
+		// the harden run. It is never silent: Next says what went wrong.
+		po := hardenOutToPrepareOut(out, in.Mode)
+		readErrs, err := injectHardenHistory(out.ManifestPath, histPath)
+		po.Next += hardenHistoryNote(readErrs, err)
+		return po, nil
 
 	case "error_report":
 		root, err := worktree.MainRoot()
@@ -209,7 +272,7 @@ func prepareOrchestrator(in PrepareOrchestratorIn) (PrepareOrchestratorOut, erro
 		if err != nil {
 			return PrepareOrchestratorOut{}, err
 		}
-		return PrepareOrchestratorOut{ManifestPath: out.ManifestPath, Mode: in.Mode, Next: prepareNextErrorReport}, nil
+		return errorReportOutToPrepareOut(out, in.Mode), nil
 
 	default:
 		return PrepareOrchestratorOut{}, &mcpserver.DomainError{
@@ -223,28 +286,54 @@ func prepareOrchestrator(in PrepareOrchestratorIn) (PrepareOrchestratorOut, erro
 // History injection for harden manifests
 // ---------------------------------------------------------------------------
 
+// hardenHistoryNote is the text that prepare_orchestrator adds to Next for
+// the result of injectHardenHistory. It is "" when the history was added
+// with no read error.
+func hardenHistoryNote(readErrs []string, err error) string {
+	if err != nil {
+		return fmt.Sprintf(" History was not added to the manifest: %s.", err.Error())
+	}
+	if len(readErrs) > 0 {
+		return fmt.Sprintf(" The history store could not be read, so the manifest's history section may miss runs or open deferred items (history.readErrors): %s.", strings.Join(readErrs, "; "))
+	}
+	return ""
+}
+
 // injectHardenHistory reads the persistent history store at histPath and
 // patches the manifest JSON at manifestPath with a "history" section
 // containing recent run records and open deferred issues.
-func injectHardenHistory(manifestPath, histPath string) error {
+//
+// A read error of runs.jsonl or deferred.json (for example a deferred.json
+// that does not parse, or one over history.DeferredFileMax) does not stop
+// the patch: its text goes into history.readErrors and is returned in
+// readErrs, so a store that cannot be read never looks like an empty one.
+// err is set only when the manifest itself cannot be read, parsed or
+// written. The write is atomic, so on error the manifest is unchanged.
+func injectHardenHistory(manifestPath, histPath string) (readErrs []string, err error) {
 	w := history.NewFileWriter(histPath)
 
-	runs, _ := w.ReadRecentRuns(10)
-	deferred, _ := w.ListDeferred()
+	runs, runsErr := w.ReadRecentRuns(10)
+	if runsErr != nil {
+		readErrs = append(readErrs, runsErr.Error())
+	}
+	deferred, deferredErr := w.ListDeferred()
+	if deferredErr != nil {
+		readErrs = append(readErrs, deferredErr.Error())
+	}
 	openDeferred := history.OpenDeferred(deferred)
 
-	if len(runs) == 0 && len(openDeferred) == 0 {
-		return nil // nothing to inject
+	if len(runs) == 0 && len(openDeferred) == 0 && len(readErrs) == 0 {
+		return nil, nil // nothing to inject
 	}
 
 	data, err := os.ReadFile(manifestPath)
 	if err != nil {
-		return err
+		return readErrs, err
 	}
 
 	var manifest map[string]any
 	if err := json.Unmarshal(data, &manifest); err != nil {
-		return err
+		return readErrs, err
 	}
 
 	histSection := map[string]any{}
@@ -254,13 +343,12 @@ func injectHardenHistory(manifestPath, histPath string) error {
 	if len(openDeferred) > 0 {
 		histSection["openDeferred"] = openDeferred
 	}
+	if len(readErrs) > 0 {
+		histSection["readErrors"] = readErrs
+	}
 	manifest["history"] = histSection
 
-	out, err := json.MarshalIndent(manifest, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(manifestPath, out, 0o644)
+	return readErrs, fsx.AtomicWriteJSON(manifestPath, manifest)
 }
 
 // ---------------------------------------------------------------------------
@@ -271,7 +359,7 @@ func injectHardenHistory(manifestPath, histPath string) error {
 // the former standalone harden_prepare and error_report_prepare tools.
 func RegisterPrepareOrchestratorTools(s *mcpserver.Server) {
 	mcpserver.Register(s, "prepare_orchestrator",
-		"INTERNAL — called by sdlc skills only. Pre-compute either the harden-orchestrator or error-report-orchestrator manifest, selected via mode (\"harden\" or \"error_report\"). harden mode covers failure details, guardrail/dimension/copilot surfaces, pipeline state, and repository context after an SDLC pipeline failure. error_report mode covers calling-skill error context plus repository/branch environment fields for a tooling-error report. Writes the manifest to a temp file and returns its path. harden mode also returns customInstructions: the [harden.instructions] lists from config.toml, one list for each proposal surface. An invalid list fails with a DomainError that names the key. Both modes return next: the step after the call.",
+		"INTERNAL — called by sdlc skills only. Pre-compute either the harden-orchestrator or error-report-orchestrator manifest, selected via mode (\"harden\" or \"error_report\"). harden mode covers failure details, guardrail/dimension/copilot surfaces, pipeline state, and repository context after an SDLC pipeline failure. error_report mode covers calling-skill error context plus repository/branch environment fields for a tooling-error report. Writes the manifest to a temp file and returns its path. harden mode also returns customInstructions: the [harden.instructions] lists from config.toml, one list for each proposal surface. An invalid list fails with a DomainError that names the key. harden mode also returns preflightFindingCount. A pre-flight finding does not stop the call: the findings are written to the manifest. Only a config read or parse error, or a review-dimensions directory that cannot be read, stops the call. mode harden also runs `git ls-files` and reads skill SKILL.md files to list dead references in rules. The manifest lists them in surfaces.deadReferences. error_report mode also runs gh issue list once (labels tooling-error and the skill, open issues, limit 10) and returns similarIssues: the issues whose title starts with [<skill>]. A gh failure does not fail the call: similarIssues is [] and similarIssuesNote says why. When the search was skipped, next ends with that note. Both modes return next: the step after the call.",
 		mcpserver.Annotations{
 			Title:       "Write orchestrator manifest",
 			ReadOnly:    false,
@@ -280,6 +368,7 @@ func RegisterPrepareOrchestratorTools(s *mcpserver.Server) {
 			OpenWorld:   true,
 		},
 		func(ctx mcpserver.Ctx, in PrepareOrchestratorIn) (PrepareOrchestratorOut, error) {
+			in.catalog = s
 			return prepareOrchestrator(in)
 		},
 	)

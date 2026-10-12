@@ -19,6 +19,60 @@ import (
 // receivedReviewSkillsSkillValueRe reads the value of --skill in a dispatch.
 var receivedReviewSkillsSkillValueRe = regexp.MustCompile(`--skill\s+([a-z][a-z0-9-]*)`)
 
+// receivedReviewSkillsFixedCallRe matches the healing_record call of the
+// implement section that records a fixed finding, from its opening line to
+// its closing "}})".
+var receivedReviewSkillsFixedCallRe = regexp.MustCompile(`(?s)action:"healing_record"[^\n]*\n\s*kind:\s+"fixed",.*?\n\}\}\)`)
+
+// receivedReviewSkillsUnfixedRuleRe matches the sentence of the implement
+// section that limits the defer call to a finding without a Deferred-id line.
+var receivedReviewSkillsUnfixedRuleRe = regexp.MustCompile("still\\s+\\*\\*unfixed\\*\\*\\s+and\\s+without\\s+a\\s+`\\*\\*Deferred-id:\\*\\*`\\s+line")
+
+// receivedReviewSkillsNoDeferRe matches the sentence of the implement section
+// that tells the skill to make no defer call for a finding with a Deferred-id
+// line.
+var receivedReviewSkillsNoDeferRe = regexp.MustCompile("already\\s+deferred:\\s+make\\s+no\\s+`defer`\\s+call,\\s+and\\s+say\\s+\"stays\\s+deferred\\s+as")
+
+// receivedReviewSkillsDeferredIDClauses are the sentences that handle a
+// finding with a Deferred-id line outside the fixed call itself: they keep it
+// from being deferred a second time, allow one retry of its fixed call and
+// account for it in the ledger. Each regexp matches one sentence across line
+// breaks. The sentences sit in the unclear-item branch, the rule on
+// recording, the failure rule for the fixed call and the ledger of the final
+// summary.
+var receivedReviewSkillsDeferredIDClauses = []struct {
+	where string
+	re    *regexp.Regexp
+}{
+	{
+		"Step 2 (an unclear item with a **Deferred-id:** line gets no defer call)",
+		regexp.MustCompile("unclear\\s+item\\s+with\\s+a\\s+`\\*\\*Deferred-id:\\*\\*`\\s+line\\s+is\\s+already\\s+deferred:\\s+make\\s+no\\s+`defer`\\s+call"),
+	},
+	{
+		"Step 4 (a finding with a **Deferred-id:** line is the one case that needs no new record)",
+		regexp.MustCompile("`\\*\\*Deferred-id:\\*\\*`\\s+line\\s+\\(Step\\s+1b\\)\\s+is\\s+the\\s+one\\s+case\\s+that\\s+needs\\s+no\\s+new\\s+record"),
+	},
+	{
+		"Step 11 (one retry of the fixed call for a finding with a **Deferred-id:** line)",
+		regexp.MustCompile("retry\\s+the\\s+same\\s+call\\s+once,\\s+with\\s+the\\s+same\\s+detail"),
+	},
+	{
+		"Step 12 (the Deferred-id exception to the deferred count)",
+		regexp.MustCompile("Except\\s+for\\s+the\\s+Deferred-id\\s+case\\s+below,\\s+a\\s+finding\\s+counts\\s+as\\s+\\*\\*deferred\\*\\*"),
+	},
+	{
+		"Step 12 (a finding with a **Deferred-id:** line that stays deferred counts as deferred)",
+		regexp.MustCompile("`\\*\\*Deferred-id:\\*\\*`\\s+line\\s+that\\s+stays\\s+deferred\\s+also\\s+counts\\s+as\\s+\\*\\*deferred\\*\\*"),
+	},
+	{
+		"Step 12 (the ledger names each such finding as stays deferred as <id>)",
+		regexp.MustCompile("`<file:line>\\s+stays\\s+deferred\\s+as\\s+<id>`"),
+	},
+}
+
+// TestReceivedReviewSkillParity checks the received-review skill against the
+// MCP registry, against the --auto rules of its recording pass and against the
+// harden skill it dispatches.
 func TestReceivedReviewSkillParity(t *testing.T) {
 	t.Run("tools_and_actions_resolve", func(t *testing.T) {
 		flagParityAssertToolsResolve(t, "received-review",
@@ -132,6 +186,77 @@ func TestReceivedReviewSkillParity(t *testing.T) {
 		}
 		if calls == 0 {
 			t.Error(`found no Skill("harden", ...) call in received-review/SKILL.md`)
+		}
+	})
+
+	// A finding with a **Deferred-id:** line is already a deferred item. The
+	// implement section must pass that id on the fixed record, and must not
+	// defer the finding a second time when it stays unfixed. The skill text is
+	// the whole implementation of that rule, so these assertions keep both
+	// halves from being edited back out.
+	t.Run("deferred_id_finding_is_not_deferred_twice", func(t *testing.T) {
+		body := flagParityBody(executeSkillsReadFile(t,
+			filepath.Join(executeSkillsRepoRoot(t), "skills", "received-review", "SKILL.md")))
+
+		fixedCall := receivedReviewSkillsFixedCallRe.FindString(body)
+		if fixedCall == "" {
+			t.Fatal(`found no healing_record call with kind:"fixed" in received-review/SKILL.md`)
+		}
+		for _, want := range []string{"deferredId:", "**Deferred-id:**"} {
+			if !strings.Contains(fixedCall, want) {
+				t.Errorf("the Step 11 healing_record call with kind:\"fixed\" no longer contains %q", want)
+			}
+		}
+		if !receivedReviewSkillsUnfixedRuleRe.MatchString(body) {
+			t.Error("Step 11 no longer limits the defer call to an unfixed finding without a **Deferred-id:** line")
+		}
+		if !receivedReviewSkillsNoDeferRe.MatchString(body) {
+			t.Error(`Step 11 no longer says a finding with a **Deferred-id:** line gets no defer call and "stays deferred as" its id`)
+		}
+	})
+
+	// The other places that touch a finding with a **Deferred-id:** line are
+	// the unclear-item branch, the recording rule, the retry rule for the
+	// fixed call and the ledger of the final summary. Each one holds a
+	// sentence that no other place repeats, so deleting it fails here.
+	t.Run("deferred_id_exceptions_are_kept", func(t *testing.T) {
+		body := flagParityBody(executeSkillsReadFile(t,
+			filepath.Join(executeSkillsRepoRoot(t), "skills", "received-review", "SKILL.md")))
+
+		for _, c := range receivedReviewSkillsDeferredIDClauses {
+			if !c.re.MatchString(body) {
+				t.Errorf("received-review/SKILL.md lost the sentence for %s", c.where)
+			}
+		}
+	})
+
+	// Under --auto, harden applies only the edits of its --auto table and
+	// stores the rest as pending deferred items. Step 11.6 must copy the
+	// Auto-accepted lines and the Pending lines of the harden output into the
+	// Step 12 summary, and the Pending headings must exist in harden's 5d
+	// summary. The pins run on the text with whitespace folded, because the
+	// sentences wrap across lines. Each pin occurs once.
+	t.Run("harden_pending_lines_are_relayed", func(t *testing.T) {
+		skill := executeSkillsReadFile(t, filepath.Join(executeSkillsRepoRoot(t), "skills", "received-review", "SKILL.md"))
+		flat := strings.Join(strings.Fields(skill), " ")
+		for _, want := range []string{
+			"harden applies only the edits that its Step 5 `--auto` table allows. It stores the other proposals as pending deferred items.",
+			"Copy the `Auto-accepted` lines and the `Pending (needs a person …)` lines into the Step 12 summary.",
+			"Copy the `Pending (NOT stored — copy them by hand)` lines too, when they appear.",
+		} {
+			hardenSkillsAssertOnce(t, "received-review/SKILL.md", flat, want)
+		}
+		if strings.Contains(flat, "harden auto-accepts its proposals") {
+			t.Error("received-review/SKILL.md says harden auto-accepts its proposals, but harden holds back some edits as pending deferred items under --auto")
+		}
+
+		harden := executeSkillsReadFile(t, filepath.Join(executeSkillsRepoRoot(t), "skills", "harden", "SKILL.md"))
+		for _, want := range []string{
+			"Auto-accepted:\n",
+			"Pending (needs a person — stored as deferred item {id}):\n",
+			"Pending (NOT stored — copy them by hand):\n",
+		} {
+			hardenSkillsAssertOnce(t, "harden/SKILL.md 5d block", harden, want)
 		}
 	})
 }

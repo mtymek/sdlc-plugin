@@ -142,19 +142,27 @@ prepare_orchestrator({
                             // conversation context and must read the file itself
   mode,                    // echoes the mode parameter ("error_report")
   next,                    // the step after this call (Step 5 dispatches the orchestrator)
+  similarIssues,           // open issues that may cover the same error: [{ number, title, url }]
+                            // always present; empty (shown as (none)) when nothing matches or the search was skipped
+  similarIssuesNote,       // only when the duplicate search was skipped; says why
+  preflightFindingCount,   // a harden-mode field; always 0 in this mode — ignore it
 }
 ```
 
 The input fields `skill`, `step`, `operation`, and `errorText` are required; the
 rest may be empty strings — the tool tolerates empty optional fields. The return
-value contains only `manifestPath`, `mode`, and `next`; the orchestrator reads all
-other fields from the manifest file at `manifestPath`.
+value contains `manifestPath`, `mode`, `next`, `similarIssues`, `preflightFindingCount` (always 0 here) and, when the duplicate search was skipped, `similarIssuesNote`.
+Keep `similarIssues` and `similarIssuesNote` for Step 6b.
+The orchestrator reads all other fields from the manifest file at `manifestPath`.
 
-When the main context needs a value later (e.g. `skill` for the duplicate-issue
-search's label filter in Step 6b), use the value it passed in this call — do not
-read the manifest file back. Only Step 5 needs `manifestPath` itself, because
-the dispatched orchestrator agent runs in isolation with no access to this
-return value.
+The tool runs the duplicate search itself. A `gh` failure in that search is not a
+tool error. The call succeeds, `similarIssues` is empty (shown as `(none)`), and `similarIssuesNote`
+says why the search was skipped.
+
+When the main context needs a value later (e.g. `skill` for the issue labels in
+Step 7), use the value it passed in this call — do not read the manifest file
+back. Only Step 5 needs `manifestPath` itself, because the dispatched
+orchestrator agent runs in isolation with no access to this return value.
 
 **On tool error:** show the error message to the user and stop. Do **not**
 recursively dispatch this skill on its own prepare-tool failure.
@@ -238,26 +246,18 @@ error handling. Do not create anything.
 
 **On `yes`:** Continue to Step 6b.
 
-## Step 6b — Duplicate Issue Search (main context)
+## Step 6b — Similar Open Issues (main context)
 
-Search for existing open issues that may cover the same error:
+The search already ran in Step 4. Do not search again.
 
-```bash
-CANDIDATES=$(gh issue list \
-  --repo "rnagrodzki/sdlc-plugin" \
-  --label "tooling-error" \
-  --label "$SKILL_NAME" \
-  --state open \
-  --limit 10 \
-  --json number,title,url)
-```
+Use `similarIssues` from the Step 4 result. Each element has `number`, `title` and `url`.
+The tool kept only open issues with the labels `tooling-error` and `<skill>`, and a title that starts with `[<skill>]`.
 
-Parse `CANDIDATES` JSON. Filter to issues whose title starts with `[$SKILL_NAME]`
-(same prefix as `PROPOSAL.title` per Step 5 format).
+If `similarIssuesNote` is set, print it first. It says why the search was skipped. In that case `similarIssues` is empty.
 
-**If no matches:** proceed to Step 7 silently (no prompt).
+**If `similarIssues` is empty:** go to Step 7. Ask no question.
 
-**If matches found:** present via `AskUserQuestion`:
+**If `similarIssues` is not empty:** present via `AskUserQuestion`:
 
 ```
 Similar open issue(s) found:
@@ -378,7 +378,7 @@ replaces the calling skill's own error output or stop behavior.
 - Run `gh issue create` inside the orchestrator agent. The agent has no `Bash`
   tool. Posting MUST run in the main context.
 - Create a GitHub issue without both consent gates passing.
-- Create a GitHub issue or comment without completing Step 6b (duplicate search).
+- Create a GitHub issue or comment without completing Step 6b (the similar open issues that the Step 4 search returned).
 - Retry a failed `gh issue create` call a second time.
 - Leave `{placeholder}` text in the issue description.
 - Append an AI-tool attribution line ("Generated with Claude Code" or similar) to the

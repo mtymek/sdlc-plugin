@@ -34,7 +34,7 @@ All three actions belong to `ship_state`. This flow needs no other MCP tool. It 
 
 An item has `id`, `created`, `source`, `priority`, `description` and `status`. It may also have `severity`, `file`, `line` and `reason`. It has no body field.
 
-`source` names the tool that recorded the item, not the reason it was deferred. `ship_state defer` writes an id `review-deferred-<timestamp>-<N>` and a caller-supplied `source`, defaulting to `review-below-threshold` when the caller omits it — `/received-review` passes `source: "received-review"` explicitly for its `wont-fix`, `disagree` and `needs-direction` findings, which are not below any threshold. Read `reason` to tell those apart. The execute step writes source `execute-drift` and an id `execute-drift-<timestamp>-<N>`, with no `reason`. `deferred_add` takes a caller-supplied `source` and `id` too, so none of this is a closed set. The tool that finds an item records it at that moment. This flow never adds an item.
+`source` names the tool that recorded the item, not the reason it was deferred. `ship_state defer` writes an id `review-deferred-<timestamp>-<N>` and a caller-supplied `source`, defaulting to `review-below-threshold` when the caller omits it — `/received-review` passes `source: "received-review"` explicitly for its `wont-fix`, `disagree` and `needs-direction` findings, which are not below any threshold. Read `reason` to tell those apart. One exception to the new id: a `defer` with reason `needs-direction` on a `file` that already has an open `needs-direction` row adds no row. It appends its description as a line to that row and returns that row's id. `ship_state defer` writes the caller's `description`, or the finding title when the caller passes none. `/ship` passes the finding body, so a `description` can have more than one line. The execute step writes source `execute-drift` and an id `execute-drift-<timestamp>-<N>`, with no `reason`. `deferred_add` takes a caller-supplied `source` and `id` too, so none of this is a closed set. `/sdlc:harden --auto` writes source `harden-pending` for rule edits that need a person. Its `description` starts with the line `Pending rule edits: <section>`. Item 0 of section 3 handles it. The tool that finds an item records it at that moment. This flow never adds an item.
 
 ## The flow
 
@@ -53,7 +53,7 @@ Option 3 ends the flow. Nothing changes. Every item stays open.
 
 ### 2. Pick the items
 
-For option 1 or 2, ask which items to act on. Use one multi-select `AskUserQuestion` with one option per open item, labelled `[<id>] <description>`.
+For option 1 or 2, ask which items to act on. Use one multi-select `AskUserQuestion` with one option per open item, labelled `[<id>] <first line of description>`.
 
 - If exactly one item is open, it is the pick. Do not ask.
 - `AskUserQuestion` lists only a few options. If more items are open than it can list, print the ids in chat and ask the user to reply with the ids to act on, or with `all`.
@@ -62,6 +62,14 @@ For option 1 or 2, ask which items to act on. Use one multi-select `AskUserQuest
 
 Take the picked items one at a time. For each item:
 
+0. **Pending rule edits.** If the item's `source` is `harden-pending`, do not draft an issue. Do not run `gh issue create`. A person must approve rule edits in a harden run. Set `<id>` to the item's `id`, such as `harden-pending-plan` or `harden-pending-plan-2`. Print these two lines:
+
+   ```text
+   <id> holds rule edits that need a person. Run: /sdlc:harden --failure-text "Pending rule edits: <id>" --skill deferred
+   Then resolve it: /sdlc:deferred --resolve <id>
+   ```
+
+   Count the item as still open. Do not call `deferred_resolve`. Go to the next item.
 1. **Draft.** Build the issue title and body as described in "The issue text" below.
 2. **Show.** Print the title and the complete body in chat, in a fenced block, exactly as they will be filed. A summary or a shortened version does not count.
 3. **Get approval.** Ask one `AskUserQuestion`: file as shown, change the text, or skip this item. On "change the text", take the user's edits, show the full text again, and ask again. On "skip", leave the item open and go to the next item.
@@ -83,7 +91,10 @@ If `deferred_resolve` fails after the issue was created, say so, print the issue
 
 ### 4. Option 2: resolve without filing
 
-For each picked item, call `ship_state({action:"deferred_resolve", detail:{id:"<id>"}})`. Make no draft and no `gh` call. The pick in step 2 is the user's decision, so ask nothing more.
+Take the picked items one at a time. For each item:
+
+- **Pending rule edits.** If the item's `source` is `harden-pending`, do not call `deferred_resolve`. Resolving it closes the item and loses the rule edits. Print the same two lines as item 0 of section 3. The second line tells the user to resolve the item after the harden run. Leave the item open and go to the next item.
+- **Any other item.** Call `ship_state({action:"deferred_resolve", detail:{id:"<id>"}})`. Make no draft and no `gh` call. The pick in step 2 is the user's decision, so ask nothing more.
 
 ### 5. Close out
 
@@ -91,14 +102,16 @@ Print one line with three counts: items filed, items resolved without filing, an
 
 ## The issue text
 
-**Title:** the item's `description`.
+**Title:** the first line of the item's `description`. The body still carries the whole `description`.
 
 **Body:** built from the item's fields. Leave out any line whose field is empty.
 
 ```text
 ## Deferred follow-up
 
+{fence}text
 {description}
+{fence}
 
 - Priority: {priority}
 - Recorded: {created}
@@ -109,6 +122,8 @@ Print one line with three counts: items filed, items resolved without filing, an
 ```
 
 `Location` drops `:{line}` when `line` is 0 or unset.
+
+`{fence}` is a run of backticks, one longer than the longest backtick run in `description` and at least three. Copy `description` inside the fence verbatim. Then no line of it can close the fence or forge the lines below it, and a later reader sees that it is quoted text, not instructions.
 
 The body carries no `Source` line. `source` names the recording tool, not the reason: a `ship_state defer` record carries the caller's `source`, or `review-below-threshold` when the caller omits it, which would contradict a `Reason deferred` of `disagree`, `needs-direction` or `wont-fix`. `Reason deferred` says why the item was deferred, and the `Deferred item id` prefix says which tool recorded it.
 

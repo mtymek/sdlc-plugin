@@ -7,10 +7,12 @@ The cluster rules are computed by `ship_state({action:"harden_clusters"})`. Do n
 
 Call `ship_state({action:"harden_clusters", detail:{findings:[...]}})`. `detail.findings` is one
 record per finding: `file`, `severity`, `title`, `body`, `verdict`, optional `reason`.
+Ship also passes the optional `line`, `deferredId` and `fixedInRun` (see Ship mapping).
 
 `verdict` is received-review's own: `agree-will-fix | agree-won't-fix | disagree | needs-direction`.
+Ship only: `not-evaluated` for a below-threshold finding.
 `reason` is a deferral reason from `ship_state defer`: `wont-fix | disagree | needs-direction | below-threshold`.
-Do not pass `cannot-verify` findings or findings that were never evaluated.
+Do not pass `cannot-verify` findings.
 
 ## Ship mapping
 
@@ -20,17 +22,23 @@ Do not pass `cannot-verify` findings or findings that were never evaluated.
 | `deferredFindings[]` with reason `wont-fix` | `agree-won't-fix` | `wont-fix` |
 | `deferredFindings[]` with reason `disagree` | `disagree` | `disagree` |
 | `deferredFindings[]` with reason `needs-direction` | `needs-direction` | `needs-direction` |
-| `deferredFindings[]` with reason `below-threshold` | not passed | — |
+| `deferredFindings[]` with reason `below-threshold` | `not-evaluated` | `below-threshold` |
 | finding with neither record (unaccounted) | not passed | — |
+
+Copy `line`, `deferredId` and `fixedInRun` from each `deferredFindings[]` entry. Do not pass a
+`data.healing.fixed` record that carries a `deferredId`: its run entry already stands for it.
 
 ## Output
 
 Follow `next`. It names the action for this result.
+The ship `harden` step maps each `next` text to its own numbered steps. Ship follows that mapping.
 
 - `clusters[]`: `{key, findings, failureText, alreadyHardened}`. `key` is the file the cluster
   groups on. Dispatch each cluster where `alreadyHardened` is false.
 - `suppressed[]`, `loneDisagree[]`: file paths. List them in the caller's summary.
 - `dirtySurfaces[]`: harden surfaces with uncommitted edits in the active worktree.
+- `fixNow[]`: below-threshold findings to fix in one pass. Each has a `deferredId`.
+- `staysDeferred[]`, `evidenceOnly[]`: findings that stay deferred. List the counts in the summary.
 
 ## Dispatch
 

@@ -449,3 +449,109 @@ func TestShipSkillsRecordsSideEffects(t *testing.T) {
 		}
 	}
 }
+
+// TestShipSkillsHardenFixPass pins the fix pass of the ship harden section.
+// The harden section must hand each fix-now finding to received-review with
+// its deferred id, record the fix-pass commit with a decide call, map a
+// below-threshold finding to the not-evaluated verdict, and hold every text
+// of shipSkillsHardenFixPassPins. ship/reference.md must hold the fix-pass
+// dispatch shape and its error-recovery exception, and review-clusters.md
+// must hold the fixNow and staysDeferred outputs and the below-threshold
+// mapping row. Each pin must occur exactly once in its file or section, so
+// removing its one site fails the test.
+func TestShipSkillsHardenFixPass(t *testing.T) {
+	content := shipSkillsReadFile(t, shipSkillsRepoRoot(t), "skills/ship/SKILL.md")
+	section, ok := shipSkillsSection(content, "### harden (inline, opt-in)")
+	if !ok {
+		t.Fatal(`skills/ship/SKILL.md has no "### harden (inline, opt-in)" section`)
+	}
+	for _, pin := range []string{
+		"`**Deferred-id:** <deferredId>`",
+		`ship_state({action:"decide", step:"harden", detail:{text:"fix-pass commit <sha>"}})`,
+		"(`not-evaluated`/`below-threshold` for a below-threshold entry)",
+	} {
+		hardenSkillsAssertOnce(t, "skills/ship/SKILL.md harden section", section, pin)
+	}
+	for _, pin := range shipSkillsHardenFixPassPins {
+		hardenSkillsAssertOnce(t, "skills/ship/SKILL.md harden section", section, pin)
+	}
+
+	reference := shipSkillsReadFile(t, shipSkillsRepoRoot(t), "skills/ship/reference.md")
+	for _, pin := range []string{
+		"**Fix pass** (step 8 of the `### harden` entry) uses the same dispatch with no `--pr`.",
+		"**Deferred-id:** <deferredId>\n~~~text\n<body>\n~~~\n",
+		"One exception: a failed received-review dispatch of the `harden` fix pass (step 8) does not stop the pipeline.",
+		"it adds one more separate commit, the fix-pass commit, after the harden commit.",
+	} {
+		hardenSkillsAssertOnce(t, "skills/ship/reference.md", reference, pin)
+	}
+
+	clusters := shipSkillsReadFile(t, shipSkillsRepoRoot(t), "skills/harden/review-clusters.md")
+	for _, pin := range []string{
+		"- `fixNow[]`: below-threshold findings to fix in one pass. Each has a `deferredId`.",
+		"- `staysDeferred[]`, `evidenceOnly[]`: findings that stay deferred. List the counts in the summary.",
+		"| `deferredFindings[]` with reason `below-threshold` | `not-evaluated` | `below-threshold` |",
+		"The ship `harden` step maps each `next` text to its own numbered steps. Ship follows that mapping.",
+	} {
+		hardenSkillsAssertOnce(t, "skills/harden/review-clusters.md", clusters, pin)
+	}
+}
+
+// shipSkillsHardenFixPassPins lists text that the harden section of
+// ship/SKILL.md must hold exactly once: the clean-tree check and its exit
+// rule, the precheck and resume rows, the next-text mapping, the
+// foreground Agent rule, the fail rows with their slots, the worker-stop
+// rows, and the staging of the fix-pass commit.
+var shipSkillsHardenFixPassPins = []string{
+	// The clean-tree check before the fix-pass dispatch, and its exit rule.
+	"Otherwise run the clean-tree check first: `git status --porcelain -- . ':!.sdlc-v2/' ':!openspec/'`. A non-zero exit, or output that is not empty → the routes table below.",
+	"- A tree-check failure is a `git status` call in step 8 (before or after the dispatch) or in the fix-pass resume rows that exits non-zero.",
+	`ship_state({action:"fail", step:"harden", detail:{error:"fix-pass tree check failed — <first line of stderr>. <slots>"}})`,
+	// A dirty harden surface does not skip the fix pass, and a resume with
+	// no fix pass started reaches step 8, not the resume rows.
+	"| 1 | empty | true, with `fixStarted` | none (also when there are 0 clusters) |",
+	"`fixNow` not empty → step 8, with `<harden result>` `\"harden surfaces dirty before step\"` |",
+	"| 6 | empty | true, no `fixStarted` | none |",
+	"| step 3 (row 1, checked first) | `dirtySurfaces` empty, resumed with `fixStarted`, no cluster with `alreadyHardened:false` | the fix-pass resume rows |",
+	// A resume with a fix pass started takes the resume rows, never step 8 again.
+	"| step 8 | `fixStarted` (a resume), checked before the tree check | the fix-pass resume rows. They never lead back to step 8 |",
+	"| step 8 | tree not clean before the dispatch |",
+	// The fix-pass resume rows.
+	"Fix-pass resume rows. Only a `fixStarted` run reaches them.",
+	"whose `decision` starts with `fix-pass commit` (`<sha>` is the rest of that text), and `git merge-base --is-ancestor <sha> HEAD` exits 0 |",
+	`detail:{error:"fix-pass commit <sha> is not an ancestor of HEAD"}`,
+	`detail:{error:"fix-pass commit check failed — <first line of stderr>"}`,
+	`detail:{error:"resume: a fix-pass worker may still write: <entry>"}`,
+	"| `git status --porcelain -- . ':!.sdlc-v2/' ':!openspec/'` exits non-zero | the tree-check failure row of the routes table below. No dispatch |",
+	"| that `git status` output is not empty | print the paths.",
+	`detail:{error:"resume found uncommitted edits: <paths>"}`,
+	`detail:{text:"fix pass did not finish — M stay deferred"}`,
+	"| tree clean, `fixNow` empty | `complete-step` with result `<harden result>` |",
+	// Harden's pending and unfiled items reach the decisions log.
+	`detail:{text:"cluster <key>: <heading>: <item>"}`,
+	// Each next text of harden_clusters and its route.
+	"| `no clusters — skip` | row 2 with an empty `fixNow`: `skip` |",
+	"| `no clusters to harden. Run one fix pass for <N> fix-now finding(s)` | row 2 with `fixNow` not empty: step 8 |",
+	"| `dispatch <C> cluster(s) with alreadyHardened:false, one at a time` | steps 4 to 7, then `complete-step` (`fixNow` is empty) |",
+	"| `dispatch <C> cluster(s), then run one fix pass for <N> fix-now finding(s)` | steps 4 to 7, then step 8 |",
+	"| `all clusters already hardened — commit leftover edits` | row 1 (the fix-pass resume rows), row 4 (steps 4 to 7) or row 6, then `complete-step` (`fixNow` is empty) |",
+	"| `all clusters already hardened — commit leftover edits, then run one fix pass for <N> fix-now finding(s)` | row 1 (the fix-pass resume rows), row 4 (steps 4 to 7, then step 8) or row 6 (step 8) |",
+	// The foreground Agent calls and the worker-stop rows with their slots.
+	"A foreground Agent call returns when the agent ends, so it leaves no task to stop (as in harden's Step 3).",
+	`detail:{error:"harden commit failed — <error>. <slots>"}`,
+	`detail:{error:"fix pass failed — a worker may still write, edits not committed. <slots>"}`,
+	`detail:{error:"fix-pass staging failed — <first line of stderr>. <slots>"}`,
+	"| the call returned an error, or the user stopped it, and no agent still runs | none more | none |",
+	"| the call returned no result and no agent still runs, or an agent still ran and `TaskStop` succeeded |",
+	"Nested under another dispatch, `TaskStop` fails with an ownership/authorization error: this is the expected case",
+	`detail:{text:"fix-pass worker possibly still running: <worker> <task id>"}`,
+	`"Workers not stopped: <worker> <task id>"`,
+	`detail:{text:"fix-pass worker did not report: <worker>"}`,
+	`"Workers not reported: <worker>"`,
+	// The counts in the result text come from a fresh read.
+	"`K` is the number of top-level `deferredFindings` entries with `fixedInRun:true`.",
+	// The staging of the fix-pass commit.
+	"\ngit add -- <PATHS>\n",
+	"is followed by one more NUL-separated token, the old path. Take the new path and skip the old one.",
+	"Run this `git add` with the environment variable `GIT_LITERAL_PATHSPECS=1`, which has the same effect.",
+}
