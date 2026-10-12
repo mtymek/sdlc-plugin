@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.4.4] - 2026-10-12
+
+### RC 1
+
+- Harden can now repair, remove and merge rules, not only add or tighten them. A generic-rule gate drops drafts that target one case.
+- Harden writes pre-flight findings and dead references into its manifest instead of stopping the run. Learnings that recur 3 or more times become proposals.
+- Guardrail checks accept a scope. A JSON null on a guardrail id in the config writer deletes the guardrail table.
+- The ship harden step runs a fix pass for below-threshold findings and commits the fixes. Ship state stores the deferred id and fix record, and report readers skip fixed entries.
+- Items that harden leaves pending are stored as deferred items and are never filed as issues. The deferred store merges related items for the same file.
+- Error report lists similar open issues from the preparation tool.
+- Skill docs and OpenSpec specs describe the new behavior.
+
 ## [0.4.3] - 2026-10-11
 
 ### RC 1
