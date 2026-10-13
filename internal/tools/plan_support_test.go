@@ -10,9 +10,11 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/rnagrodzki/sdlc-plugin/internal/mcpserver"
 	"github.com/rnagrodzki/sdlc-plugin/internal/openspec"
@@ -2306,11 +2308,41 @@ func TestPlanSupportOpenspecStage(t *testing.T) {
 // preplan_context
 // ---------------------------------------------------------------------------
 
-// preplanSkeletonFor returns the exact text of a new topic file for topic.
+// setPreplanNow fixes the clock of preplan_context for one test.
+func setPreplanNow(t *testing.T, at time.Time) {
+	t.Helper()
+	old := preplanNow
+	preplanNow = func() time.Time { return at }
+	t.Cleanup(func() { preplanNow = old })
+}
+
+// preplanTestNow is the clock the preplan_context tests set with
+// setPreplanNow. preplanSkeletonFor writes its Started line.
+var preplanTestNow = time.Date(2026, 10, 12, 12, 0, 0, 0, time.UTC)
+
+// preplanDirNames lists the names in dir, in name order. A missing dir gives
+// no names.
+func preplanDirNames(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("read %s: %v", dir, err)
+	}
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	return names
+}
+
+// preplanSkeletonFor returns the exact text of a new topic file for topic,
+// created at preplanTestNow.
 func preplanSkeletonFor(topic string) string {
 	return "# Preplan: " + topic + "\n" +
 		"\n" +
 		"**Status:** in progress\n" +
+		"\n" +
+		"**Started:** 2026-10-12T12:00:00Z\n" +
 		"\n" +
 		"## Goal\n" +
 		"\n" +
@@ -2349,6 +2381,7 @@ func dataDirEntries(t *testing.T, root string) []string {
 // guardrails as plan_prepare, creates the topic file once with the skeleton,
 // never changes an existing file, and starts no plan run.
 func TestPlanSupportPreplanContext(t *testing.T) {
+	setPreplanNow(t, preplanTestNow)
 	const guardrailsToml = "" +
 		"[plan.guardrails.no-secrets]\n" +
 		"description = \"Never commit secrets\"\n" +
@@ -2364,7 +2397,7 @@ func TestPlanSupportPreplanContext(t *testing.T) {
 		if err != nil {
 			t.Fatalf("preplan_context: %v", err)
 		}
-		wantFile := filepath.Join(root, ".sdlc-v2", "preplan", "auth-flow.md")
+		wantFile := filepath.Join(root, ".sdlc-v2", "preplan", "2026-10-12-auth-flow.md")
 		if out.PreplanFile != wantFile {
 			t.Errorf("PreplanFile = %q, want %q", out.PreplanFile, wantFile)
 		}
@@ -2378,7 +2411,7 @@ func TestPlanSupportPreplanContext(t *testing.T) {
 		if string(got) != preplanSkeletonFor("auth flow") {
 			t.Errorf("topic file =\n%s\nwant the skeleton:\n%s", got, preplanSkeletonFor("auth flow"))
 		}
-		if want := "2 guardrail(s) loaded. Created topic file auth-flow.md."; out.Summary != want {
+		if want := "2 guardrail(s) loaded. Created topic file 2026-10-12-auth-flow.md."; out.Summary != want {
 			t.Errorf("Summary = %q, want %q", out.Summary, want)
 		}
 		if want := "Read preplanFile, then ask the first question."; out.Next != want {
@@ -2467,7 +2500,7 @@ func TestPlanSupportPreplanContext(t *testing.T) {
 		if err != nil {
 			t.Fatalf("preplan_context: %v", err)
 		}
-		if want := filepath.Join(root, ".sdlc-v2", "preplan", "etc-passwd.md"); out.PreplanFile != want {
+		if want := filepath.Join(root, ".sdlc-v2", "preplan", "2026-10-12-etc-passwd.md"); out.PreplanFile != want {
 			t.Errorf("PreplanFile = %q, want %q", out.PreplanFile, want)
 		}
 	})
@@ -2479,7 +2512,7 @@ func TestPlanSupportPreplanContext(t *testing.T) {
 		if err != nil {
 			t.Fatalf("preplan_context: %v", err)
 		}
-		if want := filepath.Join(root, ".sdlc-v2", "preplan", topic+".md"); out.PreplanFile != want {
+		if want := filepath.Join(root, ".sdlc-v2", "preplan", "2026-10-12-"+topic+".md"); out.PreplanFile != want {
 			t.Errorf("PreplanFile = %q, want %q", out.PreplanFile, want)
 		}
 	})
@@ -2493,7 +2526,7 @@ func TestPlanSupportPreplanContext(t *testing.T) {
 		if out.Guardrails == nil || len(out.Guardrails) != 0 {
 			t.Errorf("Guardrails = %#v, want empty non-nil slice", out.Guardrails)
 		}
-		if want := "0 guardrail(s) loaded — none configured. Created topic file auth-flow.md."; out.Summary != want {
+		if want := "0 guardrail(s) loaded — none configured. Created topic file 2026-10-12-auth-flow.md."; out.Summary != want {
 			t.Errorf("Summary = %q, want %q", out.Summary, want)
 		}
 		if want := "Read preplanFile, then ask the first question."; out.Next != want {
@@ -2526,7 +2559,7 @@ func TestPlanSupportPreplanContext(t *testing.T) {
 			t.Errorf("Guardrails = %#v, want empty non-nil slice", out.Guardrails)
 		}
 		if !strings.HasPrefix(out.Summary, "0 guardrail(s) loaded. Warning: Failed to read plan config: ") ||
-			!strings.HasSuffix(out.Summary, ". Created topic file auth-flow.md.") {
+			!strings.HasSuffix(out.Summary, ". Created topic file 2026-10-12-auth-flow.md.") {
 			t.Errorf("Summary = %q, want the read warning between the count and the file state", out.Summary)
 		}
 		if want := "Read preplanFile, then ask the first question. Record the warning in the Guardrail check section."; out.Next != want {
@@ -2543,12 +2576,114 @@ func TestPlanSupportPreplanContext(t *testing.T) {
 		if !strings.Contains(text, "- preplanCreated: true") {
 			t.Errorf("rendered result lacks preplanCreated: true:\n%s", text)
 		}
-		if _, err := os.Stat(filepath.Join(root, ".sdlc-v2", "preplan", "auth-flow.md")); err != nil {
+		if _, err := os.Stat(filepath.Join(root, ".sdlc-v2", "preplan", "2026-10-12-auth-flow.md")); err != nil {
 			t.Errorf("topic file missing after the MCP call: %v", err)
 		}
 		again := evidenceRender(t, root, map[string]any{"action": "preplan_context", "topic": "auth flow"})
 		if !strings.Contains(again, "- preplanCreated: false") {
 			t.Errorf("second call must render preplanCreated: false:\n%s", again)
+		}
+	})
+
+	t.Run("a new file takes the UTC date and the UTC Started time", func(t *testing.T) {
+		setPreplanNow(t, time.Date(2026, 10, 12, 23, 30, 0, 0, time.FixedZone("UTC-5", -5*60*60)))
+		root := newOpenspecStageFixture(t, "")
+		out, err := planSupportCore(root, root, PlanSupportIn{Action: "preplan_context", Topic: "auth flow"})
+		if err != nil {
+			t.Fatalf("preplan_context: %v", err)
+		}
+		wantFile := filepath.Join(root, ".sdlc-v2", "preplan", "2026-10-13-auth-flow.md")
+		if out.PreplanFile != wantFile {
+			t.Errorf("PreplanFile = %q, want %q", out.PreplanFile, wantFile)
+		}
+		if out.PreplanCreated == nil || !*out.PreplanCreated {
+			t.Errorf("PreplanCreated = %v, want true", out.PreplanCreated)
+		}
+		got, err := os.ReadFile(wantFile)
+		if err != nil {
+			t.Fatalf("read topic file: %v", err)
+		}
+		if !strings.Contains(string(got), "\n**Started:** 2026-10-13T04:30:00Z\n") {
+			t.Errorf("topic file lacks the line **Started:** 2026-10-13T04:30:00Z:\n%s", got)
+		}
+		if want := " Created topic file 2026-10-13-auth-flow.md."; !strings.HasSuffix(out.Summary, want) {
+			t.Errorf("Summary = %q, want the suffix %q", out.Summary, want)
+		}
+	})
+
+	t.Run("an existing dated file is continued", func(t *testing.T) {
+		root := newOpenspecStageFixture(t, "")
+		file := filepath.Join(root, ".sdlc-v2", "preplan", "2026-10-01-auth-flow.md")
+		const custom = "# Preplan: auth flow\n\nOlder notes.\n"
+		writeFile(t, file, custom)
+
+		out, err := planSupportCore(root, root, PlanSupportIn{Action: "preplan_context", Topic: "auth flow"})
+		if err != nil {
+			t.Fatalf("preplan_context: %v", err)
+		}
+		if out.PreplanCreated == nil || *out.PreplanCreated {
+			t.Errorf("PreplanCreated = %v, want false (set) for an existing dated file", out.PreplanCreated)
+		}
+		if out.PreplanFile != file {
+			t.Errorf("PreplanFile = %q, want %q", out.PreplanFile, file)
+		}
+		if got, _ := os.ReadFile(file); string(got) != custom {
+			t.Errorf("topic file = %q, want it unchanged (%q)", got, custom)
+		}
+		if want := " Topic file 2026-10-01-auth-flow.md exists."; !strings.HasSuffix(out.Summary, want) {
+			t.Errorf("Summary = %q, want the suffix %q", out.Summary, want)
+		}
+		if names := preplanDirNames(t, filepath.Dir(file)); !reflect.DeepEqual(names, []string{"2026-10-01-auth-flow.md"}) {
+			t.Errorf("preplan dir entries = %v, want only [2026-10-01-auth-flow.md]", names)
+		}
+	})
+
+	t.Run("names that only look like the topic file do not match", func(t *testing.T) {
+		root := newOpenspecStageFixture(t, "")
+		dir := filepath.Join(root, ".sdlc-v2", "preplan")
+		// The last two have the length of a real match: one fails the date
+		// check, and one has a valid date but another slug.
+		others := []string{"2026-1-12-auth-flow.md", "auth-flow.md.bak", "other-auth-flow.md",
+			"2026-1a-12-auth-flow.md", "2026-10-12-auth-flaw.md"}
+		for _, n := range others {
+			writeFile(t, filepath.Join(dir, n), "# Preplan: other\n")
+		}
+
+		out, err := planSupportCore(root, root, PlanSupportIn{Action: "preplan_context", Topic: "auth flow"})
+		if err != nil {
+			t.Fatalf("preplan_context: %v", err)
+		}
+		if want := filepath.Join(dir, "2026-10-12-auth-flow.md"); out.PreplanFile != want {
+			t.Errorf("PreplanFile = %q, want %q", out.PreplanFile, want)
+		}
+		if out.PreplanCreated == nil || !*out.PreplanCreated {
+			t.Errorf("PreplanCreated = %v, want true", out.PreplanCreated)
+		}
+		want := append([]string{"2026-10-12-auth-flow.md"}, others...)
+		sort.Strings(want)
+		if names := preplanDirNames(t, dir); !reflect.DeepEqual(names, want) {
+			t.Errorf("preplan dir entries = %v, want %v", names, want)
+		}
+	})
+
+	t.Run("an empty preplan folder gets a dated file", func(t *testing.T) {
+		root := newOpenspecStageFixture(t, "")
+		dir := filepath.Join(root, ".sdlc-v2", "preplan")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		out, err := planSupportCore(root, root, PlanSupportIn{Action: "preplan_context", Topic: "auth flow"})
+		if err != nil {
+			t.Fatalf("preplan_context: %v", err)
+		}
+		if want := filepath.Join(dir, "2026-10-12-auth-flow.md"); out.PreplanFile != want {
+			t.Errorf("PreplanFile = %q, want %q", out.PreplanFile, want)
+		}
+		if out.PreplanCreated == nil || !*out.PreplanCreated {
+			t.Errorf("PreplanCreated = %v, want true", out.PreplanCreated)
+		}
+		if got, _ := os.ReadFile(out.PreplanFile); string(got) != preplanSkeletonFor("auth flow") {
+			t.Errorf("topic file = %q, want the skeleton", got)
 		}
 	})
 
@@ -2570,6 +2705,7 @@ func TestPlanSupportPreplanContext(t *testing.T) {
 // TestPlanSupportPreplanContextErrors maps every bad topic to its DomainError
 // and Suggestion with nothing written, and a failed create to its InfraError.
 func TestPlanSupportPreplanContextErrors(t *testing.T) {
+	setPreplanNow(t, preplanTestNow)
 	const (
 		asciiSuggestion = "Pass a topic name with ASCII letters or digits, for example \"auth flow\"."
 		longSuggestion  = "Pass a shorter topic name. Put the detail in the first answer."
@@ -2623,11 +2759,11 @@ func TestPlanSupportPreplanContextErrors(t *testing.T) {
 		if got := errorClassOf(err); got != "infra" {
 			t.Errorf("error class = %q, want infra (err %v)", got, err)
 		}
-		wantPrefix := "preplan_context: create " + filepath.Join(blocker, "auth-flow.md") + ": "
-		if !strings.HasPrefix(err.Error(), wantPrefix) {
-			t.Errorf("err.Error() = %q, want prefix %q", err.Error(), wantPrefix)
+		// The os error names the folder, so the message names it once.
+		if msg := err.Error(); !strings.HasPrefix(msg, "preplan_context: list: ") || strings.Count(msg, blocker) != 1 {
+			t.Errorf("err.Error() = %q, want prefix \"preplan_context: list: \" and %s named once", msg, blocker)
 		}
-		if want := "Check write permission on .sdlc-v2/preplan/, then run the skill again."; suggestionOf(err) != want {
+		if want := "Make " + blocker + " a folder that you can read: remove or rename the file or link at that path, or give your user read permission. Then run /sdlc:preplan again."; suggestionOf(err) != want {
 			t.Errorf("Suggestion = %q, want %q", suggestionOf(err), want)
 		}
 		if got, _ := os.ReadFile(blocker); string(got) != "not a directory\n" {
@@ -2654,7 +2790,7 @@ func TestPlanSupportPreplanContextErrors(t *testing.T) {
 		if got := errorClassOf(err); got != "infra" {
 			t.Errorf("error class = %q, want infra (err %v)", got, err)
 		}
-		wantMsg := "preplan_context: create " + filepath.Join(link, "auth-flow.md") + ": " +
+		wantMsg := "preplan_context: create " + filepath.Join(link, "2026-10-12-auth-flow.md") + ": " +
 			link + " is a link to " + target + ", which does not exist."
 		if err.Error() != wantMsg {
 			t.Errorf("err.Error() = %q, want %q", err.Error(), wantMsg)
@@ -2756,6 +2892,147 @@ func TestPlanSupportPreplanContextErrors(t *testing.T) {
 		}
 	})
 
+	t.Run("a preplan folder without read permission", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root ignores directory modes")
+		}
+		root := t.TempDir()
+		dir := filepath.Join(root, ".sdlc-v2", "preplan")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(dir, 0o300); err != nil {
+			t.Fatalf("remove read permission: %v", err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+
+		_, err := planSupportCore(root, root, PlanSupportIn{Action: "preplan_context", Topic: "auth flow"})
+		if err == nil {
+			t.Fatal("expected an error, got nil")
+		}
+		if got := errorClassOf(err); got != "infra" {
+			t.Errorf("error class = %q, want infra (err %v)", got, err)
+		}
+		if !errors.Is(err, fs.ErrPermission) {
+			t.Errorf("err = %v, want it to wrap fs.ErrPermission", err)
+		}
+		if msg := err.Error(); !strings.HasPrefix(msg, "preplan_context: list: ") || strings.Count(msg, dir) != 1 {
+			t.Errorf("err.Error() = %q, want prefix \"preplan_context: list: \" and %s named once", msg, dir)
+		}
+		if want := "Make " + dir + " a folder that you can read: remove or rename the file or link at that path, or give your user read permission. Then run /sdlc:preplan again."; suggestionOf(err) != want {
+			t.Errorf("Suggestion = %q, want %q", suggestionOf(err), want)
+		}
+		_ = os.Chmod(dir, 0o755)
+		if names := preplanDirNames(t, dir); len(names) != 0 {
+			t.Errorf("preplan dir entries = %v, want none", names)
+		}
+	})
+
+	t.Run("a preplan folder with more than preplanDirMax names", func(t *testing.T) {
+		old := preplanDirMax
+		preplanDirMax = 2
+		t.Cleanup(func() { preplanDirMax = old })
+		root := t.TempDir()
+		dir := filepath.Join(root, ".sdlc-v2", "preplan")
+		for _, n := range []string{"a.md", "b.md", "c.md"} {
+			writeFile(t, filepath.Join(dir, n), "# Preplan: x\n")
+		}
+
+		_, err := planSupportCore(root, root, PlanSupportIn{Action: "preplan_context", Topic: "auth flow"})
+		if err == nil {
+			t.Fatal("expected an error, got nil")
+		}
+		if got := errorClassOf(err); got != "infra" {
+			t.Errorf("error class = %q, want infra (err %v)", got, err)
+		}
+		if !errors.Is(err, errPreplanDirFull) {
+			t.Errorf("err = %v, want it to wrap errPreplanDirFull", err)
+		}
+		if want := "preplan_context: list " + dir + ": the folder holds more than 2 names"; err.Error() != want {
+			t.Errorf("err.Error() = %q, want %q", err.Error(), want)
+		}
+		if want := "Move old topic files out of " + dir + " until it holds at most 2 names. Then run /sdlc:preplan again."; suggestionOf(err) != want {
+			t.Errorf("Suggestion = %q, want %q", suggestionOf(err), want)
+		}
+		if names := preplanDirNames(t, dir); !reflect.DeepEqual(names, []string{"a.md", "b.md", "c.md"}) {
+			t.Errorf("preplan dir entries = %v, want only [a.md b.md c.md]", names)
+		}
+	})
+
+	t.Run("a preplan folder with exactly preplanDirMax names", func(t *testing.T) {
+		old := preplanDirMax
+		preplanDirMax = 2
+		t.Cleanup(func() { preplanDirMax = old })
+		root := t.TempDir()
+		dir := filepath.Join(root, ".sdlc-v2", "preplan")
+		for _, n := range []string{"a.md", "b.md"} {
+			writeFile(t, filepath.Join(dir, n), "# Preplan: x\n")
+		}
+
+		out, err := planSupportCore(root, root, PlanSupportIn{Action: "preplan_context", Topic: "auth flow"})
+		if err != nil {
+			t.Fatalf("preplan_context: %v", err)
+		}
+		if out.PreplanCreated == nil || !*out.PreplanCreated {
+			t.Errorf("PreplanCreated = %v, want true", out.PreplanCreated)
+		}
+		if names := preplanDirNames(t, dir); !reflect.DeepEqual(names, []string{"2026-10-12-auth-flow.md", "a.md", "b.md"}) {
+			t.Errorf("preplan dir entries = %v, want the new topic file, a.md and b.md", names)
+		}
+	})
+
+	// A regular file in place of the data folder makes the open of the
+	// preplan folder fail with "not a directory". Unlike a folder mode, this
+	// fails for root too, so the open error branch is covered on every runner.
+	t.Run("a regular file in place of the data folder", func(t *testing.T) {
+		root := t.TempDir()
+		blocker := filepath.Join(root, ".sdlc-v2")
+		writeFile(t, blocker, "not a directory\n")
+		dir := filepath.Join(blocker, "preplan")
+
+		_, err := planSupportCore(root, root, PlanSupportIn{Action: "preplan_context", Topic: "auth flow"})
+		if err == nil {
+			t.Fatal("expected an error, got nil")
+		}
+		if got := errorClassOf(err); got != "infra" {
+			t.Errorf("error class = %q, want infra (err %v)", got, err)
+		}
+		if msg := err.Error(); !strings.HasPrefix(msg, "preplan_context: list: open "+dir+": ") {
+			t.Errorf("err.Error() = %q, want prefix %q", msg, "preplan_context: list: open "+dir+": ")
+		}
+		if want := "Make " + dir + " a folder that you can read: remove or rename the file or link at that path, or give your user read permission. Then run /sdlc:preplan again."; suggestionOf(err) != want {
+			t.Errorf("Suggestion = %q, want %q", suggestionOf(err), want)
+		}
+		if got, _ := os.ReadFile(blocker); string(got) != "not a directory\n" {
+			t.Errorf("blocking file = %q, want it unchanged", got)
+		}
+	})
+
+	t.Run("two topic files for one slug", func(t *testing.T) {
+		root := t.TempDir()
+		dir := filepath.Join(root, ".sdlc-v2", "preplan")
+		writeFile(t, filepath.Join(dir, "auth-flow.md"), "# Preplan: auth flow\n")
+		writeFile(t, filepath.Join(dir, "2026-10-01-auth-flow.md"), "# Preplan: auth flow\n")
+
+		out, err := planSupportCore(root, root, PlanSupportIn{Action: "preplan_context", Topic: "auth flow"})
+		if err == nil {
+			t.Fatalf("expected an error, got nil (preplanCreated %v)", out.PreplanCreated)
+		}
+		if got := errorClassOf(err); got != "data" {
+			t.Errorf("error class = %q, want data (err %v)", got, err)
+		}
+		wantMsg := `preplan_context: topic "auth flow" matches 2 topic files in ` + dir + ": 2026-10-01-auth-flow.md, auth-flow.md"
+		if err.Error() != wantMsg {
+			t.Errorf("err.Error() = %q, want %q", err.Error(), wantMsg)
+		}
+		if want := "Rename or delete one of: 2026-10-01-auth-flow.md, auth-flow.md. Then run /sdlc:preplan again."; suggestionOf(err) != want {
+			t.Errorf("Suggestion = %q, want %q", suggestionOf(err), want)
+		}
+		if names := preplanDirNames(t, dir); !reflect.DeepEqual(names, []string{"2026-10-01-auth-flow.md", "auth-flow.md"}) {
+			t.Errorf("preplan dir entries = %v, want only the two topic files", names)
+		}
+	})
+
 	notAFile := []struct {
 		name    string
 		setup   func(t *testing.T, file string)
@@ -2780,30 +3057,33 @@ func TestPlanSupportPreplanContextErrors(t *testing.T) {
 			return "preplan_context: create " + file + ": exists and is not a regular file"
 		}},
 	}
+	// Each case runs for the dated name (the default) and the undated name.
 	for _, tc := range notAFile {
-		t.Run(tc.name+" is an InfraError, not an existing topic file", func(t *testing.T) {
-			root := t.TempDir()
-			preplanDir := filepath.Join(root, ".sdlc-v2", "preplan")
-			if err := os.MkdirAll(preplanDir, 0o755); err != nil {
-				t.Fatal(err)
-			}
-			file := filepath.Join(preplanDir, "auth-flow.md")
-			tc.setup(t, file)
+		for _, name := range []string{"2026-10-12-auth-flow.md", "auth-flow.md"} {
+			t.Run(tc.name+" ("+name+") is an InfraError, not an existing topic file", func(t *testing.T) {
+				root := t.TempDir()
+				preplanDir := filepath.Join(root, ".sdlc-v2", "preplan")
+				if err := os.MkdirAll(preplanDir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				file := filepath.Join(preplanDir, name)
+				tc.setup(t, file)
 
-			out, err := planSupportCore(root, root, PlanSupportIn{Action: "preplan_context", Topic: "auth flow"})
-			if err == nil {
-				t.Fatalf("expected an error, got nil (preplanCreated %v)", out.PreplanCreated)
-			}
-			if got := errorClassOf(err); got != "infra" {
-				t.Errorf("error class = %q, want infra (err %v)", got, err)
-			}
-			if want := tc.wantMsg(file); err.Error() != want {
-				t.Errorf("err.Error() = %q, want %q", err.Error(), want)
-			}
-			if want := "Check write permission on .sdlc-v2/preplan/, then run the skill again."; suggestionOf(err) != want {
-				t.Errorf("Suggestion = %q, want %q", suggestionOf(err), want)
-			}
-		})
+				out, err := planSupportCore(root, root, PlanSupportIn{Action: "preplan_context", Topic: "auth flow"})
+				if err == nil {
+					t.Fatalf("expected an error, got nil (preplanCreated %v)", out.PreplanCreated)
+				}
+				if got := errorClassOf(err); got != "infra" {
+					t.Errorf("error class = %q, want infra (err %v)", got, err)
+				}
+				if want := tc.wantMsg(file); err.Error() != want {
+					t.Errorf("err.Error() = %q, want %q", err.Error(), want)
+				}
+				if want := "Check write permission on .sdlc-v2/preplan/, then run the skill again."; suggestionOf(err) != want {
+					t.Errorf("Suggestion = %q, want %q", suggestionOf(err), want)
+				}
+			})
+		}
 	}
 }
 
@@ -2885,6 +3165,7 @@ func TestCreatePreplanFileWriteStepFailures(t *testing.T) {
 // reaches the caller as an InfraError with a Suggestion, reports no created
 // file, and leaves no topic file.
 func TestPlanPreplanContextWriteFailure(t *testing.T) {
+	setPreplanNow(t, preplanTestNow)
 	root := t.TempDir()
 	failPreplanWrite(t)
 
@@ -2902,9 +3183,8 @@ func TestPlanPreplanContextWriteFailure(t *testing.T) {
 	if out.PreplanCreated != nil || out.PreplanFile != "" {
 		t.Errorf("output = {created %v, file %q}, want {nil, \"\"}", out.PreplanCreated, out.PreplanFile)
 	}
-	topicFile := filepath.Join(root, ".sdlc-v2", "preplan", "auth-flow.md")
-	if _, statErr := os.Stat(topicFile); !errors.Is(statErr, fs.ErrNotExist) {
-		t.Errorf("topic file left behind (stat err %v)", statErr)
+	if names := preplanDirNames(t, filepath.Join(root, ".sdlc-v2", "preplan")); len(names) != 0 {
+		t.Errorf("preplan folder holds %v, want none (a topic file left behind)", names)
 	}
 }
 

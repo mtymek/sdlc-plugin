@@ -233,7 +233,18 @@ describe('preplanItems', () => {
     const items = view.preplanItems(repos, new Set());
     assert.deepEqual(items.map((i) => i.slug), ['new', 'alpha', 'zeta', 'old', 'none']);
     assert.equal(items[0].repo, repos[1]);
-    assert.deepEqual(Object.keys(items[0]).sort(), ['path', 'repo', 'slug', 'status', 'topic', 'updatedAt']);
+    assert.deepEqual(Object.keys(items[0]).sort(), ['durationMs', 'path', 'repo', 'slug', 'status', 'topic', 'updatedAt']);
+  });
+
+  test('a duration that is not a finite number gives 0', () => {
+    const repos = [{ name: 'r', root: '/r', preplans: [
+      { slug: 'a', updatedAt: '2026-10-08T10:00:00Z' },
+      { slug: 'b', updatedAt: '2026-10-08T10:00:00Z', durationMs: '4800000' },
+      { slug: 'c', updatedAt: '2026-10-08T10:00:00Z', durationMs: NaN },
+      { slug: 'd', updatedAt: '2026-10-08T10:00:00Z', durationMs: 4800000 },
+    ] }];
+    // An empty scope keeps every repo. Equal times sort by slug.
+    assert.deepEqual(view.preplanItems(repos, new Set()).map((i) => i.durationMs), [0, 0, 0, 4800000]);
   });
 
   test('the scope keeps the repos in scope only', () => {
@@ -285,7 +296,7 @@ describe('dateLabel', () => {
 
 describe('defaultUi', () => {
   test('gives the all outcome, no sort, and the all chips', () => {
-    assert.deepEqual(view.defaultUi(), { historyOutcome: 'all', historySort: null, preplanStatus: 'all', deferredPriority: 'all' });
+    assert.deepEqual(view.defaultUi(), { historyOutcome: 'all', historySort: null, preplanStatus: 'all', preplanSort: null, deferredPriority: 'all' });
   });
 
   test('gives a new object on each call', () => {
@@ -334,6 +345,64 @@ describe('nextHistorySort', () => {
       assert.deepEqual(view.nextHistorySort(before, key), after);
     });
   }
+
+  test('with PREPLAN_SORT_FIRST, repo starts asc and updated and duration start desc', () => {
+    assert.deepEqual(view.PREPLAN_SORT_FIRST, { repo: 'asc' });
+    assert.deepEqual(view.nextHistorySort(null, 'repo', view.PREPLAN_SORT_FIRST), { key: 'repo', dir: 'asc' });
+    assert.deepEqual(view.nextHistorySort(null, 'updated', view.PREPLAN_SORT_FIRST), { key: 'updated', dir: 'desc' });
+    assert.deepEqual(view.nextHistorySort(null, 'duration', view.PREPLAN_SORT_FIRST), { key: 'duration', dir: 'desc' });
+    assert.deepEqual(view.nextHistorySort({ key: 'updated', dir: 'desc' }, 'repo', view.PREPLAN_SORT_FIRST), { key: 'repo', dir: 'asc' });
+  });
+
+  test('with PREPLAN_SORT_FIRST, a second click on the same key flips the order', () => {
+    assert.deepEqual(view.nextHistorySort({ key: 'repo', dir: 'asc' }, 'repo', view.PREPLAN_SORT_FIRST), { key: 'repo', dir: 'desc' });
+    assert.deepEqual(view.nextHistorySort({ key: 'repo', dir: 'desc' }, 'repo', view.PREPLAN_SORT_FIRST), { key: 'repo', dir: 'asc' });
+    assert.deepEqual(view.nextHistorySort({ key: 'duration', dir: 'desc' }, 'duration', view.PREPLAN_SORT_FIRST), { key: 'duration', dir: 'asc' });
+  });
+});
+
+describe('sortPreplans', () => {
+  const ra = { name: 'alpha' };
+  const rb = { name: 'Beta' };
+  // Newest change first, as preplanItems gives them.
+  const items = [
+    { slug: 'b1', repo: rb, updatedAt: '2026-10-09T10:00:00Z', durationMs: 60000 },
+    { slug: 'a1', repo: ra, updatedAt: '2026-10-08T10:00:00Z', durationMs: 0 },
+    { slug: 'b2', repo: rb, updatedAt: '2026-10-07T10:00:00Z', durationMs: 4800000 },
+    { slug: 'a2', repo: ra, updatedAt: '2026-10-06T10:00:00Z', durationMs: 26000 },
+    { slug: 'n', repo: ra, updatedAt: '', durationMs: 0 },
+  ];
+  const slugs = (list) => list.map((i) => i.slug);
+
+  test('null keeps the input order, in a new array', () => {
+    const out = view.sortPreplans(items, null);
+    assert.deepEqual(slugs(out), ['b1', 'a1', 'b2', 'a2', 'n']);
+    assert.notEqual(out, items);
+    assert.deepEqual(view.sortPreplans(undefined, null), []);
+  });
+
+  test('an unknown key keeps the input order', () => {
+    assert.deepEqual(slugs(view.sortPreplans(items, { key: 'topic', dir: 'asc' })), ['b1', 'a1', 'b2', 'a2', 'n']);
+  });
+
+  test('updated sorts by change time in both orders, with no time last', () => {
+    assert.deepEqual(slugs(view.sortPreplans(items, { key: 'updated', dir: 'desc' })), ['b1', 'a1', 'b2', 'a2', 'n']);
+    assert.deepEqual(slugs(view.sortPreplans(items, { key: 'updated', dir: 'asc' })), ['a2', 'b2', 'a1', 'b1', 'n']);
+  });
+
+  test('repo sorts A to Z, then Z to A, and equal repos keep the newest-first order', () => {
+    const first = view.nextHistorySort(null, 'repo', view.PREPLAN_SORT_FIRST);
+    assert.deepEqual(slugs(view.sortPreplans(items, first)), ['a1', 'a2', 'n', 'b1', 'b2']);
+    const second = view.nextHistorySort(first, 'repo', view.PREPLAN_SORT_FIRST);
+    assert.deepEqual(slugs(view.sortPreplans(items, second)), ['b1', 'b2', 'a1', 'a2', 'n']);
+  });
+
+  test('duration sorts longest first, then shortest first, with 0 last in both orders', () => {
+    const first = view.nextHistorySort(null, 'duration', view.PREPLAN_SORT_FIRST);
+    assert.deepEqual(slugs(view.sortPreplans(items, first)), ['b2', 'b1', 'a2', 'a1', 'n']);
+    const second = view.nextHistorySort(first, 'duration', view.PREPLAN_SORT_FIRST);
+    assert.deepEqual(slugs(view.sortPreplans(items, second)), ['a2', 'b1', 'b2', 'a1', 'n']);
+  });
 });
 
 describe('sortHistory', () => {
@@ -2568,6 +2637,14 @@ describe('render pipelineBlock', () => {
     });
     assert.equal(oneByClass(block, 'attn-elapsed').textContent, '4m 12s');
   });
+
+  test('a pipeline with a wait keeps the repo name in the right group and has no Dismiss button', () => {
+    const attention = { kind: 'question', askedAt: '2026-10-08T10:00:00Z', header: 'Q', text: 't' };
+    const block = render.pipelineBlock(fakeDoc(), view, REPO, pipeline({ attention }), { collapsed: false, selected: 0, now: NOW_WAIT });
+    const head = oneByClass(block, 'pipe-head');
+    assert.equal(byClass(oneByClass(head, 'pipe-side'), 'pipe-repo').length, 1);
+    assert.equal(byClass(oneByClass(block, 'attn-bar'), 'wait-dismiss').length, 0);
+  });
 });
 
 describe('render elapsedText', () => {
@@ -2680,10 +2757,10 @@ describe('render loneWaitCard', () => {
     assert.equal(draw(PERMISSION).attrs['data-lone-wait'], 'sess-2|');
   });
 
-  test('the banner comes first: the bar with the wait age, then the header and the quoted text', () => {
+  test('the banner comes first: the bar with the wait age and Dismiss, then the header and the quoted text', () => {
     const card = draw(QUESTION);
     assert.equal(card.children[0].className, 'attn-bar');
-    assert.equal(textOf(card.children[0]), '◈ WAITING ON YOU · 4m 12s');
+    assert.equal(textOf(card.children[0]), '◈ WAITING ON YOU · 4m 12sDismiss');
     assert.equal(card.children[1].className, 'attn-text');
     assert.equal(card.children[1].textContent, 'Next step: "Which retry strategy?"');
     assert.equal(card.children[2].tagName, 'header');
@@ -2707,7 +2784,7 @@ describe('render loneWaitCard', () => {
     assert.equal(byClass(card, 'wait-dismiss').length, 1);
   });
 
-  test('the head shows the lamp, the wait kind, the branch, the repo name and the Dismiss button', () => {
+  test('the head shows the lamp, the wait kind, the branch and the repo name', () => {
     const head = oneByClass(draw(PERMISSION), 'pipe-head');
     assert.equal(head.tagName, 'header');
     assert.deepEqual(classesOf(head.children[0]), ['lamp', 'running', 'waiting']);
@@ -2718,12 +2795,20 @@ describe('render loneWaitCard', () => {
     assert.equal(head.children[2].className, 'pipe-branch');
     assert.equal(head.children[2].textContent, 'fix/refund-rounding');
     assert.equal(head.children[2].attrs.title, 'fix/refund-rounding');
-    const side = head.children[3];
-    assert.equal(side.className, 'pipe-side');
-    assert.equal(side.children[0].className, 'pipe-repo');
-    assert.equal(side.children[0].textContent, 'payments-service');
-    assert.equal(side.children[0].attrs.title, '/src/payments');
-    assert.equal(side.children[1].className, 'wait-dismiss');
+    assert.equal(head.children.length, 4);
+    assert.equal(head.children[3].className, 'pipe-repo near');
+    assert.equal(head.children[3].textContent, 'payments-service');
+    assert.equal(head.children[3].attrs.title, '/src/payments');
+    assert.equal(byClass(head, 'wait-dismiss').length, 0);
+  });
+
+  test('the Dismiss button is the last child of the banner bar, after the wait age', () => {
+    const bar = oneByClass(draw(PERMISSION), 'attn-bar');
+    const last = bar.children[bar.children.length - 1];
+    assert.equal(last.className, 'wait-dismiss');
+    assert.equal(bar.children[bar.children.length - 2].className, 'attn-elapsed');
+    assert.equal(last.attrs['data-wait-kind'], 'permission');
+    assert.equal(last.attrs['data-repo'], '/src/payments');
   });
 
   test('a wait with no branch has no branch heading', () => {
@@ -3160,7 +3245,7 @@ describe('render preplanPanel', () => {
     const panel = render.preplanPanel(fakeDoc(), view, repos, new Set());
     assert.equal(panel.className, 'list-panel hist-panel pp-panel');
     assert.equal(textOf(oneByClass(panel, 'list-title')), 'Preplans (3)');
-    assert.deepEqual(findAll(oneByClass(panel, 'pp'), (n) => n.tagName === 'th').map(textOf), ['status', 'topic', 'repo', 'updated', '']);
+    assert.deepEqual(findAll(oneByClass(panel, 'pp'), (n) => n.tagName === 'th').map(textOf), ['status', 'topic', 'repo↕', 'updated↕', 'duration↕', '']);
     assert.deepEqual(slugsOf(panel), ['.sdlc-v2/preplan/alpha.md', '.sdlc-v2/preplan/zeta.md', '.sdlc-v2/preplan/old.md']);
     const first = rowsOf(panel)[0];
     assert.equal(oneByClass(first, 'pp-name').textContent, 'Alpha topic');
@@ -3185,6 +3270,73 @@ describe('render preplanPanel', () => {
     assert.deepEqual(chips.map((c) => c.attrs['aria-pressed']), ['true', 'false', 'false', 'false', 'false']);
     assert.equal(byClass(chips[0], 'pp-status').length, 0);
     assert.equal(oneByClass(chips[3], 'pp-status').className, 'pp-status pp-paused');
+  });
+
+  test('the repo, updated and duration headers are sort buttons; no sort marks none', () => {
+    const panel = render.preplanPanel(fakeDoc(), view, repos, new Set());
+    const sortable = byClass(oneByClass(panel, 'pp'), 'sortable');
+    assert.deepEqual(sortable.map((th) => th.tagName), ['th', 'th', 'th']);
+    assert.deepEqual(sortable.map((th) => th.attrs['aria-sort']), ['none', 'none', 'none']);
+    const buttons = sortable.map((th) => th.children[0]);
+    assert.deepEqual(buttons.map((b) => b.tagName), ['button', 'button', 'button']);
+    assert.deepEqual(buttons.map((b) => b.attrs['data-pp-sort']), ['repo', 'updated', 'duration']);
+    assert.deepEqual(buttons.map((b) => b.className), ['sort-btn', 'sort-btn', 'sort-btn']);
+  });
+
+  test('the duration cell: h-dur with a title, a time for a positive durationMs, a dash for 0', () => {
+    const timed = [{ root: '/a', name: 'a', preplans: [
+      { slug: 'long', topic: 'Long', status: 'paused', path: '.sdlc-v2/preplan/long.md', updatedAt: '2026-10-08T10:00:00Z', durationMs: 4800000 },
+      { slug: 'short', topic: 'Short', status: 'paused', path: '.sdlc-v2/preplan/short.md', updatedAt: '2026-10-07T10:00:00Z', durationMs: 26000 },
+      { slug: 'none', topic: 'None', status: 'paused', path: '.sdlc-v2/preplan/none.md', updatedAt: '2026-10-06T10:00:00Z', durationMs: 0 },
+    ] }];
+    const panel = render.preplanPanel(fakeDoc(), view, timed, new Set());
+    const cells = rowsOf(panel).map((r) => oneByClass(r, 'h-dur'));
+    assert.deepEqual(cells.map((c) => c.tagName), ['td', 'td', 'td']);
+    assert.deepEqual(cells.map(textOf), ['1h 20m', '26s', '—']);
+    assert.deepEqual(cells.map((c) => c.attrs.title), Array(3).fill('Time from the start of the preplan to its last change'));
+    // The duration cell sits after the updated cell and before the bin cell.
+    const row = rowsOf(panel)[0];
+    assert.deepEqual(row.children.map((c) => c.className), ['', 'pp-topic', 'h-repo', 'h-when', 'h-dur', 'pp-act']);
+  });
+
+  test('a preplan with no durationMs field shows a dash', () => {
+    const panel = render.preplanPanel(fakeDoc(), view, repos, new Set());
+    assert.deepEqual(rowsOf(panel).map((r) => textOf(oneByClass(r, 'h-dur'))), ['—', '—', '—']);
+  });
+
+  test('the duration header sorts the longest first; a row with no duration is last', () => {
+    const timed = [{ root: '/a', name: 'a', preplans: [
+      { slug: 'none', topic: 'None', status: 'paused', path: '.sdlc-v2/preplan/none.md', updatedAt: '2026-10-09T10:00:00Z', durationMs: 0 },
+      { slug: 'short', topic: 'Short', status: 'paused', path: '.sdlc-v2/preplan/short.md', updatedAt: '2026-10-08T10:00:00Z', durationMs: 26000 },
+      { slug: 'long', topic: 'Long', status: 'paused', path: '.sdlc-v2/preplan/long.md', updatedAt: '2026-10-07T10:00:00Z', durationMs: 4800000 },
+    ] }];
+    const ui = view.defaultUi();
+    ui.preplanSort = view.nextHistorySort(null, 'duration', view.PREPLAN_SORT_FIRST);
+    const panel = render.preplanPanel(fakeDoc(), view, timed, new Set(), ui);
+    const sortable = byClass(oneByClass(panel, 'pp'), 'sortable');
+    assert.deepEqual(sortable.map((th) => th.attrs['aria-sort']), ['none', 'none', 'descending']);
+    assert.deepEqual(slugsOf(panel), ['.sdlc-v2/preplan/long.md', '.sdlc-v2/preplan/short.md', '.sdlc-v2/preplan/none.md']);
+    ui.preplanSort = view.nextHistorySort(ui.preplanSort, 'duration', view.PREPLAN_SORT_FIRST);
+    const flipped = render.preplanPanel(fakeDoc(), view, timed, new Set(), ui);
+    assert.deepEqual(slugsOf(flipped), ['.sdlc-v2/preplan/short.md', '.sdlc-v2/preplan/long.md', '.sdlc-v2/preplan/none.md']);
+  });
+
+  test('the active sort header has aria-sort and the class on, and the rows follow the sort', () => {
+    const ui = view.defaultUi();
+    ui.preplanSort = view.nextHistorySort(null, 'repo', view.PREPLAN_SORT_FIRST);
+    let panel = render.preplanPanel(fakeDoc(), view, repos, new Set(), ui);
+    let sortable = byClass(oneByClass(panel, 'pp'), 'sortable');
+    assert.deepEqual(sortable.map((th) => th.attrs['aria-sort']), ['ascending', 'none', 'none']);
+    assert.deepEqual(sortable.map((th) => th.children[0].className), ['sort-btn on', 'sort-btn', 'sort-btn']);
+    assert.deepEqual(sortable.map(textOf), ['repo▲', 'updated↕', 'duration↕']);
+    // Repo a first; inside a, the newest change first.
+    assert.deepEqual(slugsOf(panel), ['.sdlc-v2/preplan/zeta.md', '.sdlc-v2/preplan/old.md', '.sdlc-v2/preplan/alpha.md']);
+
+    ui.preplanSort = { key: 'updated', dir: 'asc' };
+    panel = render.preplanPanel(fakeDoc(), view, repos, new Set(), ui);
+    sortable = byClass(oneByClass(panel, 'pp'), 'sortable');
+    assert.deepEqual(sortable.map((th) => th.attrs['aria-sort']), ['none', 'ascending', 'none']);
+    assert.deepEqual(slugsOf(panel), ['.sdlc-v2/preplan/old.md', '.sdlc-v2/preplan/alpha.md', '.sdlc-v2/preplan/zeta.md']);
   });
 
   test('a status chip shows only the rows with that status', () => {

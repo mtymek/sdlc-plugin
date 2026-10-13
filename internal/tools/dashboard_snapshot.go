@@ -369,11 +369,17 @@ type DashboardRun struct {
 
 // DashboardPreplan is one preplan topic file of a repo.
 type DashboardPreplan struct {
-	Slug      string `json:"slug"`      // file name without .md
+	// Slug is the file name without .md, so a dated file gives
+	// YYYY-MM-DD-<slug>. It is not the bare slug of plan_support
+	// (preplanSlug), which has no date.
+	Slug      string `json:"slug"`
 	Topic     string `json:"topic"`     // from "# Preplan: <topic>", else the slug
 	Status    string `json:"status"`    // raw "**Status:**" value, "" when absent
 	Path      string `json:"path"`      // repo-relative: .sdlc-v2/preplan/<slug>.md
 	UpdatedAt string `json:"updatedAt"` // file mtime, RFC 3339 UTC
+	// DurationMs is the file change time minus the time on the
+	// "**Started:**" line, in milliseconds. 0 means unknown, as in DashboardRun.
+	DurationMs int64 `json:"durationMs"`
 }
 
 // dashboardJoinInfo carries join keys between collectors. Never serialized.

@@ -33,6 +33,10 @@ var dashboardPreplanTopicRe = regexp.MustCompile(`(?m)^# Preplan:[ \t]*(.*)$`)
 // file, capturing the status text.
 var dashboardPreplanStatusRe = regexp.MustCompile(`(?m)^\*\*Status:\*\*[ \t]*(.*)$`)
 
+// dashboardPreplanStartedRe matches the "**Started:** <time>" line of a topic
+// file, capturing the time text. preplan_context writes the time in RFC 3339.
+var dashboardPreplanStartedRe = regexp.MustCompile(`(?m)^\*\*Started:\*\*[ \t]*(\S*)`)
+
 // dashboardPreplanFile is one topic file that passed the Stat check.
 type dashboardPreplanFile struct {
 	slug string
@@ -115,18 +119,43 @@ func dashboardPreplans(root string) (list []DashboardPreplan, warnings []string)
 		if m := dashboardPreplanStatusRe.FindStringSubmatch(head); m != nil {
 			status = dashboardPreview(strings.TrimSpace(m[1]))
 		}
+		durationMs, warning := dashboardPreplanDuration(head, f.slug, f.mod)
+		if warning != "" {
+			warnings = append(warnings, warning)
+		}
 		list = append(list, DashboardPreplan{
-			Slug:      f.slug,
-			Topic:     topic,
-			Status:    status,
-			Path:      path.Join(paths.DataDir, paths.PreplanSubdir, f.slug+".md"),
-			UpdatedAt: dashboardFormatTime(f.mod),
+			Slug:       f.slug,
+			Topic:      topic,
+			Status:     status,
+			Path:       path.Join(paths.DataDir, paths.PreplanSubdir, f.slug+".md"),
+			UpdatedAt:  dashboardFormatTime(f.mod),
+			DurationMs: durationMs,
 		})
 	}
 	if older > 0 {
 		warnings = append(warnings, fmt.Sprintf("%d older preplan topic files not shown", older))
 	}
 	return list, warnings
+}
+
+// dashboardPreplanDuration returns the time from the "**Started:**" line of
+// head to mod, in milliseconds, and a warning text ("" for none). A missing
+// Started line gives 0 with no warning: every topic file from before the line
+// existed has none. A time that does not parse gives 0 and one warning. A
+// start at or after mod gives 0, like an unknown duration in History.
+func dashboardPreplanDuration(head, slug string, mod time.Time) (int64, string) {
+	m := dashboardPreplanStartedRe.FindStringSubmatch(head)
+	if m == nil {
+		return 0, ""
+	}
+	started, ok := dashboardParseTime(m[1])
+	if !ok {
+		return 0, fmt.Sprintf("Preplan %s start time not read: %q (expected RFC 3339; duration shown as 0)", slug, dashboardPreview(m[1]))
+	}
+	if !mod.After(started) {
+		return 0, ""
+	}
+	return mod.Sub(started).Milliseconds(), ""
 }
 
 // dashboardPreplanGone reports whether err, from a Stat or an open of the

@@ -194,8 +194,8 @@
   /**
    * The card of one lone wait: an open wait that no shown pipeline owns. It
    * has the wait banner of a pipeline (the bar with the wait age, then the
-   * header and the text), then a head with a lamp, the wait kind, the branch,
-   * the repo name and the Dismiss button. The card and the button carry the
+   * header and the text), then a head with a lamp, the wait kind, the branch
+   * and the repo name. The Dismiss button sits in the bar. The card and the button carry the
    * key `sessionId|toolUseId`, with an empty toolUseId for a permission wait.
    * The click handler in app.js reads data-wait-dismiss, data-wait-kind and
    * data-repo.
@@ -219,7 +219,7 @@
     var branch = wait.branch ? el(doc, 'h2', 'pipe-branch', wait.branch) : null;
     if (branch) branch.setAttribute('title', wait.branch);
 
-    var repoName = el(doc, 'span', 'pipe-repo', repo.name);
+    var repoName = el(doc, 'span', 'pipe-repo near', repo.name);
     repoName.setAttribute('title', repo.root);
 
     var dismiss = el(doc, 'button', 'wait-dismiss', 'Dismiss');
@@ -233,10 +233,13 @@
       lamp,
       el(doc, 'span', 'pipe-kind', wait.kind),
       branch,
-      append(el(doc, 'span', 'pipe-side'), [repoName, dismiss]),
+      repoName,
     ]);
-    // The banner comes first, as it does in the block of a pipeline.
-    append(card, attentionRows(doc, view, wait, at));
+    // The banner comes first, as it does in the block of a pipeline. The
+    // Dismiss button sits in the bar, right after the wait age.
+    var rows = attentionRows(doc, view, wait, at);
+    rows[0].appendChild(dismiss);
+    append(card, rows);
     return append(card, [head]);
   }
 
@@ -1423,6 +1426,28 @@
   }
 
   /**
+   * One sortable header cell: th.sortable with aria-sort, and button.sort-btn[attr=name] with the name and an arrow (↕, ▲ or ▼).
+   * @param {Document} doc
+   * @param {string} name the column name and the sort key
+   * @param {{key: string, dir: string}|null} sort the active sort
+   * @param {string} attr 'data-hist-sort' | 'data-pp-sort'
+   * @returns {Element} th.sortable
+   */
+  function sortHeader(doc, name, sort, attr) {
+    var on = !!sort && sort.key === name;
+    var th = el(doc, 'th', 'sortable');
+    th.setAttribute('aria-sort', on ? (sort.dir === 'asc' ? 'ascending' : 'descending') : 'none');
+    var button = el(doc, 'button', 'sort-btn' + (on ? ' on' : ''));
+    button.setAttribute('type', 'button');
+    button.setAttribute(attr, name);
+    var arrow = el(doc, 'span', 'sort-arrow', on ? (sort.dir === 'asc' ? '▲' : '▼') : '↕');
+    arrow.setAttribute('aria-hidden', 'true');
+    append(button, [el(doc, 'span', '', name), arrow]);
+    th.appendChild(button);
+    return th;
+  }
+
+  /**
    * The History tab: `Finished runs (n)`, a row of outcome chips that filter
    * the table, and one table of the runs of the repos in scope. The finished,
    * plan, ship and total controls sort the table: a new control starts with the largest
@@ -1513,17 +1538,7 @@
         headRow.appendChild(el(doc, 'th', '', name));
         return;
       }
-      var on = !!sort && sort.key === name;
-      var th = el(doc, 'th', 'sortable');
-      th.setAttribute('aria-sort', on ? (sort.dir === 'asc' ? 'ascending' : 'descending') : 'none');
-      var button = el(doc, 'button', 'sort-btn' + (on ? ' on' : ''));
-      button.setAttribute('type', 'button');
-      button.setAttribute('data-hist-sort', name);
-      var arrow = el(doc, 'span', 'sort-arrow', on ? (sort.dir === 'asc' ? '▲' : '▼') : '↕');
-      arrow.setAttribute('aria-hidden', 'true');
-      append(button, [el(doc, 'span', '', name), arrow]);
-      th.appendChild(button);
-      headRow.appendChild(th);
+      headRow.appendChild(sortHeader(doc, name, sort, 'data-hist-sort'));
     });
     var body = el(doc, 'tbody', '');
     runs.forEach(function (run) {
@@ -1801,26 +1816,36 @@
     return append(el(doc, 'span', 'pp-status pp-set ' + m.cls), [glyph, menu]);
   }
 
+  // The columns of the Preplans table, in order. The last column holds the bin button and has no name.
+  var PREPLAN_COLUMNS = ['status', 'topic', 'repo', 'updated', 'duration', ''];
+  var PREPLAN_SORTABLE = { repo: true, updated: true, duration: true };
+
   /**
    * The Preplans tab: `Preplans (n)`, one repo-warning line for each warning
    * of a repo in scope, a row of status chips that filter the table, then one
-   * row for each topic file, newest change first. A status outside
+   * row for each topic file, newest change first. The repo, updated and
+   * duration controls sort the table (view.sortPreplans). A status outside
    * view.PREPLAN_STATUSES shows as unknown. The unknown chip always shows,
    * even when its count is 0.
    * @param {Document} doc
    * @param {object} view
    * @param {Array} repos
    * @param {Set<string>} scope
-   * @param {{preplanStatus: string}} [ui] the page state; view.defaultUi() when absent
+   * @param {{preplanStatus: string, preplanSort: {key: string, dir: string}|null}} [ui]
+   *   the page state; view.defaultUi() when absent
    * @returns {Element} section.list-panel.hist-panel.pp-panel
    */
   function preplanPanel(doc, view, repos, scope, ui) {
     ui = ui || view.defaultUi();
     var status = ui.preplanStatus || 'all';
     var all = view.preplanItems(repos, scope);
-    var items = all.filter(function (item) {
-      return status === 'all' || view.preplanStatus(item.status) === status;
-    });
+    var sort = ui.preplanSort || null;
+    var items = view.sortPreplans(
+      all.filter(function (item) {
+        return status === 'all' || view.preplanStatus(item.status) === status;
+      }),
+      sort
+    );
 
     var panel = el(doc, 'section', 'list-panel hist-panel pp-panel');
     var heading = el(doc, 'h2', 'list-title', 'Preplans ');
@@ -1843,9 +1868,8 @@
     if (items.length === 0) return append(panel, [emptyState(doc, 'no-preplans-status')]);
 
     var headRow = el(doc, 'tr', '');
-    // The last column holds the bin button and has no name.
-    ['status', 'topic', 'repo', 'updated', ''].forEach(function (name) {
-      headRow.appendChild(el(doc, 'th', '', name));
+    PREPLAN_COLUMNS.forEach(function (name) {
+      headRow.appendChild(PREPLAN_SORTABLE[name] ? sortHeader(doc, name, sort, 'data-pp-sort') : el(doc, 'th', '', name));
     });
     var body = el(doc, 'tbody', '');
     items.forEach(function (item) {
@@ -1866,12 +1890,16 @@
       repoCell.setAttribute('title', item.repo.root);
       var when = el(doc, 'td', 'h-when', view.dateLabel(item.updatedAt));
       when.setAttribute('title', item.updatedAt);
+      // historyTime shows '—' for null. positiveMs turns the unknown value 0 into null.
+      var duration = historyTime(doc, view, view.positiveMs(item.durationMs));
+      duration.setAttribute('title', 'Time from the start of the preplan to its last change');
       body.appendChild(
         append(el(doc, 'tr', ''), [
           append(el(doc, 'td', ''), [tag]),
           topic,
           repoCell,
           when,
+          duration,
           append(el(doc, 'td', 'pp-act'), [remove]),
         ])
       );
