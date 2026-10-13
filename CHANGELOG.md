@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.4.5] - 2026-10-13
+
+### RC 1
+
+- Dashboard: the Preplans table sorts by repo, updated, and duration, and shows a duration column.
+- Dashboard: the Dismiss button of a lone-wait card moves into the banner bar after the wait age. The repo name follows the branch.
+- Dashboard snapshot: each preplan reports `durationMs`, read from the `**Started:**` line of the topic file.
+- Plan: `preplan_context` creates dated topic files (`YYYY-MM-DD-<slug>.md`) with a Started line, finds both name forms, and states the limit in folder list errors.
+- Docs, OpenSpec specs, and guardrails: new text for the dated names and the Started line, and new checks for limits, warnings, and derived names.
+
 ## [0.4.4] - 2026-10-12
 
 ### RC 1
