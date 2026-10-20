@@ -1094,9 +1094,10 @@ Use the row of the proposal's action:
 | add | render the mirror (`dimensions_render_instructions`) |
 | repair, strengthen, consolidate | render the mirror again when `.github/instructions/<name>.instructions.md` exists. Otherwise do nothing |
 | remove, or the removed file of a merge | delete `.github/instructions/<name>.instructions.md` (`rm -f -- "<path>"`) when it exists. For a merge, also render the mirror of `mergedInto` again when it exists |
-| mirror render or delete fails | the halt in step 2 below, for each row |
+| mirror render refused with `has hand-written content` | print `Copilot mirror skipped: hand-written content in <path>`. With `--auto`, append `; Copilot mirror skipped: hand-written content in <path>` to its `Auto-accepted` line. Continue to the next proposal |
+| mirror render fails with any other error, or mirror delete fails | the halt in step 2 below, for each row |
 
-With these rows, no mirror keeps a dead token.
+With these rows, no mirror keeps a dead token, except a mirror that the render refused.
 
 1. **Render the mirror deterministically** (NEVER hand-author it —
    scripts-over-LLM-logic):
@@ -1117,7 +1118,7 @@ With these rows, no mirror keeps a dead token.
    active worktree; pass it anyway so the mirror root is explicit and always
    equals `CONTENT_ROOT`, matching source's #474 requirement.
 
-2. **On a render or delete error:** do NOT silently advance to the next proposal (halt per
+2. **On a render or delete error other than the hand-written refusal in the row above:** do NOT silently advance to the next proposal (halt per
    R-iteration-write rule 4). Surface the partial state explicitly:
    `Dimension written to <proposal.targetFile> but the Copilot mirror could not
    be updated (<error>) — resolve manually before continuing.` With `--auto` the
@@ -1133,14 +1134,26 @@ With these rows, no mirror keeps a dead token.
 3. **On success**, display: `Mirrored review dimension → {path}` after a
    render, or `Removed mirror → {path}` after a delete.
 
-**Existing mirror already present:** `dimensions_render_instructions`
-overwrites the mirror file wholesale. For an `add`, a mirror exists only if
-someone pre-seeded it by hand. For a `repair`, `strengthen`, `consolidate` or
-`merge`, the render runs because the mirror exists, so this is the normal
-case: the mirror follows the dimension file, and rows added to the mirror by
-hand are lost. This port has no merge-only mode for this tool. When a mirror
-holds hand-added rows you want to keep, diff before applying and fold them
-back in by hand.
+**Existing mirror already present:** each render ends the mirror with a marker line
+`<!-- sdlc:generated sha256=<hash> -->`. `<hash>` is the lowercase hex
+SHA-256 (64 characters) of all text above the marker line, with each `\r\n`
+read as `\n`. The tool replaces a mirror only when this hash still matches
+the text above it. The tool refuses the render and writes nothing (the row
+above) in these cases:
+
+- The mirror has no marker line at the end. The text is hand-written, or an
+  older sdlc version wrote the mirror before the marker existed.
+- The marker hash does not match the text above it, or the hash is not 64
+  lowercase hex characters. The text was changed by hand.
+- The mirror is over 1 MiB. The tool does not read it.
+
+A folder or other special file at the mirror path is not a refusal. The
+render fails with an InfraError ("Remove the folder or special file at
+<path>"), and step 2 above halts the loop. To adopt a refused mirror, move
+its hand-written rows into the dimension file, then call
+dimensions_render_instructions for that dimension with overwrite: true. For
+a mirror that an older sdlc version wrote and nobody edited, call with
+overwrite: true directly. /harden never passes overwrite: true.
 
 Severity vocabulary per surface is canonical in `internal/dimensions`
 (`ValidSeverities`, guardrail severities); see spec R10 + R17. The orchestrator
@@ -1255,8 +1268,12 @@ classification is `ambiguous` (5c) or `plugin-defect` (Step 6). Under
 
 `Auto-accepted` lists only proposals whose write passed 5a's validation. A
 proposal that was reverted appears under `Reverted` and never under
-`Auto-accepted`. When 5b's Copilot mirror failed for a listed proposal, append
-`; Copilot mirror failed: {error}` to its line.
+`Auto-accepted`. When 5b's Copilot mirror failed (not refused) for a listed
+proposal, append `; Copilot mirror failed: {error}` to its line. When 5b
+skipped the mirror because the render refused it, append
+`; Copilot mirror skipped: hand-written content in {path}` to its line.
+When 5b skipped the mirror because of an unsafe name, append
+`; Copilot mirror skipped: unsafe name <name>` to its line.
 
 `Repaired` lists every guardrail entry that needed at least one repair round
 (5a step 2 on the `plan-guardrails`/`execute-guardrails` path, including

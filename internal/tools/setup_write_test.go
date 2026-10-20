@@ -5,6 +5,8 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -164,20 +166,14 @@ func TestSetupWriteSections_KeepsTemplateComments(t *testing.T) {
 				"allowedScopes = ['api']\n",
 		},
 		{
-			name:     "config.toml dotted plan.guardrails",
+			name:     "config.toml dotted plan.guardrails.<id>",
 			file:     "config.toml",
 			template: configTemplate,
-			json:     `{"plan.guardrails":{"only-one":{"severity":"warning","description":"d"}}}`,
-			oldBlock: "[plan.guardrails.test-coverage-required]\n" +
-				"severity = \"error\"\n" +
-				"description = \"\"\"\n" +
-				"Every task that creates or modifies source code \\\n" +
-				"must include corresponding test cases.\"\"\"\n" +
-				"\n" +
-				"[plan.guardrails.no-ci-bypass]\n" +
+			json:     `{"plan.guardrails.no-ci-bypass":{"severity":"warning","description":"d"}}`,
+			oldBlock: "[plan.guardrails.no-ci-bypass]\n" +
 				"severity = \"error\"\n" +
 				"description = \"Plans must not include steps that skip or disable CI checks.\"\n",
-			newBlock: "[plan.guardrails.only-one]\ndescription = 'd'\nseverity = 'warning'\n",
+			newBlock: "[plan.guardrails.no-ci-bypass]\nseverity = 'warning'\ndescription = 'd'\n",
 		},
 	}
 	for _, tc := range cases {
@@ -1744,12 +1740,32 @@ func TestSetupWriteSections_NullDeletesGuardrail(t *testing.T) {
 	})
 }
 
-// TestSetupWriteSections_NullOnNonGuardrailStillClears pins that the delete
-// is limited to guardrail ids: a null on plan.guardrails itself (not a
-// guardrail id) still writes an empty table, as before.
-func TestSetupWriteSections_NullOnNonGuardrailStillClears(t *testing.T) {
+// TestSetupWriteSections_NullOnGuardrailsTableWithIdsRefused pins that a null
+// on plan.guardrails, with a guardrail id on disk, is refused and writes nothing.
+func TestSetupWriteSections_NullOnGuardrailsTableWithIdsRefused(t *testing.T) {
 	dir := t.TempDir()
-	path := writeSDLCFile(t, dir, "config.toml", "[plan.guardrails.a]\nseverity = \"error\"\n\n[jira]\ndefaultProject = \"P\"\n")
+	const before = "[plan.guardrails.a]\nseverity = \"error\"\n\n[jira]\ndefaultProject = \"P\"\n"
+	path := writeSDLCFile(t, dir, "config.toml", before)
+
+	res, text := callRegisteredSetupWriteSectionsIn(t, dir, `{"plan.guardrails":null}`)
+	if !res.IsError || !strings.Contains(text, "would remove guardrails [a]") {
+		t.Fatalf("expected the guardrail refusal, got:\n%s", text)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != before {
+		t.Errorf("config.toml changed after a refusal:\n%s", got)
+	}
+}
+
+// TestSetupWriteSections_NullOnEmptyGuardrailsTableStillClears pins that a null
+// on plan.guardrails, with no guardrail id on disk, still clears the table to
+// an empty table: content that is not a guardrail id goes.
+func TestSetupWriteSections_NullOnEmptyGuardrailsTableStillClears(t *testing.T) {
+	dir := t.TempDir()
+	path := writeSDLCFile(t, dir, "config.toml", "[plan.guardrails]\nscalar = 1\n\n[jira]\ndefaultProject = \"P\"\n")
 
 	res, text := callRegisteredSetupWriteSectionsIn(t, dir, `{"plan.guardrails":null}`)
 	if res.IsError {
@@ -1759,11 +1775,11 @@ func TestSetupWriteSections_NullOnNonGuardrailStillClears(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(got), "plan.guardrails.a") {
-		t.Errorf("plan.guardrails.a survived a null on plan.guardrails:\n%s", got)
-	}
 	if !strings.Contains(string(got), "[plan.guardrails]") {
 		t.Errorf("plan.guardrails was deleted, want an empty table:\n%s", got)
+	}
+	if strings.Contains(string(got), "scalar") {
+		t.Errorf("plan.guardrails was not cleared:\n%s", got)
 	}
 }
 
@@ -2069,39 +2085,640 @@ func TestSetupWriteSections_RefusedAndMissingGuardrailShareNext(t *testing.T) {
 	})
 }
 
-// TestSetupWriteSections_NullGuardrailDeleteErrorWithoutCommentRefusal covers
-// a delete that fails for a reason other than a comment: config.toml does not
-// parse. The error is reported for the id, next carries no hand-edit instruction
-// because the failure is not a comment refusal, another section of the call is
-// still written, and config.toml is not changed.
-func TestSetupWriteSections_NullGuardrailDeleteErrorWithoutCommentRefusal(t *testing.T) {
+// TestSetupWriteSections_NullGuardrailOnInvalidConfigFailsWhole pins that a
+// null on a guardrail id, on a config.toml that does not parse, fails the whole
+// call before any write: the guardrail check must read config.toml first, so
+// another section of the call is not written either.
+func TestSetupWriteSections_NullGuardrailOnInvalidConfigFailsWhole(t *testing.T) {
 	dir := t.TempDir()
 	content := "[plan.guardrails.dry\nseverity = \"warning\"\n"
 	path := writeSDLCFile(t, dir, "config.toml", content)
 
-	res, text := callRegisteredSetupWriteSectionsIn(t, dir, `{"plan.guardrails.dry":null,"style":{"foo":"bar"}}`)
-	if res.IsError {
-		t.Fatalf("expected a tool success carrying a per-section error, got tool error:\n%s", text)
-	}
-	for _, want := range []string{"- ok: false", "section plan.guardrails.dry:", "config.toml", "  - style\n"} {
-		if !strings.Contains(text, want) {
-			t.Errorf("output missing %q:\n%s", want, text)
-		}
-	}
-	if strings.Contains(text, "holds a comment line") {
-		t.Errorf("output reports a comment refusal for a parse error:\n%s", text)
-	}
-	if strings.Contains(text, "  - plan.guardrails.dry\n") {
-		t.Errorf("output lists the failed delete as written:\n%s", text)
-	}
-	if next := nextLine(text); next != "" {
-		t.Errorf("next line = %q, want none: a parse error is not a comment refusal", next)
+	_, err := setupWriteSections(dir, dir, SetupWriteSectionsIn{SectionsJSON: `{"plan.guardrails.dry":null,"style":{"foo":"bar"}}`})
+	var de *mcpserver.DataError
+	if !errors.As(err, &de) || !strings.Contains(de.Msg, "is not valid TOML") {
+		t.Fatalf("err = %v, want the *mcpserver.DataError for invalid TOML", err)
 	}
 	if got, _ := os.ReadFile(path); string(got) != content {
 		t.Errorf("config.toml changed:\n%s", got)
 	}
-	local, err := os.ReadFile(filepath.Join(dir, ".sdlc-v2", "local.toml"))
-	if err != nil || !strings.Contains(string(local), "foo") {
-		t.Errorf("local.toml = %q (err %v), want the style section written", local, err)
+	if _, err := os.Stat(filepath.Join(dir, ".sdlc-v2", "local.toml")); !os.IsNotExist(err) {
+		t.Errorf("local.toml was written (stat err %v), want no write", err)
 	}
+}
+
+// guardrailListing returns the sorted names inside dir/.sdlc-v2, or nil when
+// the folder is absent.
+func guardrailListing(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Join(dir, ".sdlc-v2"))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	return names
+}
+
+// guardrailGuardDisk is a config.toml with two plan guardrails and two
+// execute guardrails, in the named-table form.
+const guardrailGuardDisk = "[plan.guardrails.a]\nseverity = \"error\"\n\n[plan.guardrails.b]\nseverity = \"warning\"\n\n" +
+	"[execute.guardrails.a]\nseverity = \"error\"\n\n[execute.guardrails.b]\nseverity = \"warning\"\n"
+
+// guardrailGuardArrayDisk is a config.toml that holds the plan guardrails as
+// an array of tables.
+const guardrailGuardArrayDisk = "[[plan.guardrails]]\nid = \"a\"\nseverity = \"error\"\n\n[[plan.guardrails]]\nid = \"b\"\nseverity = \"warning\"\n"
+
+// TestSetupWriteSections_GuardrailTableGuard runs the guard of a whole-table
+// guardrail key through setupWriteSections, one case for each branch. A refused
+// case must return a DomainError that holds the wanted text, leave config.toml
+// byte for byte as it was, and add no file to .sdlc-v2. A case that must
+// succeed runs its check on the file.
+func TestSetupWriteSections_GuardrailTableGuard(t *testing.T) {
+	tests := []struct {
+		name           string
+		disk           string // config.toml content; empty means no file
+		json           string
+		wantMsg        []string // refusal: text of the error message; empty means the call succeeds
+		wantSuggestion []string // refusal: text of the Suggestion
+		wantFile       []string // success: text config.toml must hold
+		notWantFile    []string // success: text config.toml must not hold
+	}{
+		{
+			name:    "execute.guardrails drops b",
+			disk:    guardrailGuardDisk,
+			json:    `{"execute.guardrails":{"a":{"severity":"error"}}}`,
+			wantMsg: []string{`key "execute.guardrails" would remove guardrails [b] from execute.guardrails`, "Nothing was written."},
+		},
+		{
+			name:    "plan value has no guardrails",
+			disk:    guardrailGuardDisk,
+			json:    `{"plan":{"x":1}}`,
+			wantMsg: []string{`key "plan" would remove guardrails [a b] from plan.guardrails`},
+		},
+		{
+			name:     "execute value keeps all ids and adds one",
+			disk:     guardrailGuardDisk,
+			json:     `{"execute":{"guardrails":{"a":{"severity":"error"},"b":{"severity":"warning"},"c":{"severity":"error"}}}}`,
+			wantFile: []string{"[execute.guardrails.a]", "[execute.guardrails.b]", "[execute.guardrails.c]", "[plan.guardrails.a]", "[plan.guardrails.b]"},
+		},
+		{
+			name:    "array form, key drops a",
+			disk:    guardrailGuardArrayDisk,
+			json:    `{"plan.guardrails":{"b":{"severity":"warning"}}}`,
+			wantMsg: []string{`key "plan.guardrails" would remove guardrails [a] from plan.guardrails`},
+			wantSuggestion: []string{
+				`Put guardrail ids [a] back into the value of key "plan.guardrails".`,
+				"as an array of tables ([[plan.guardrails]])",
+				`"plan.guardrails.a" is refused too`,
+				"[plan.guardrails.<id>]",
+			},
+		},
+		{
+			name:           "named form, the Suggestion names the null key",
+			disk:           guardrailGuardDisk,
+			json:           `{"execute.guardrails":{"b":{"severity":"warning"}}}`,
+			wantMsg:        []string{`key "execute.guardrails" would remove guardrails [a] from execute.guardrails`},
+			wantSuggestion: []string{`Put guardrail ids [a] back into the value of key "execute.guardrails".`, `send null on its own key, for example "execute.guardrails.a"`},
+		},
+		{
+			name:    "a null id does not keep it",
+			disk:    guardrailGuardDisk,
+			json:    `{"plan.guardrails":{"a":{"severity":"error"},"b":null}}`,
+			wantMsg: []string{`key "plan.guardrails" would remove guardrails [b] from plan.guardrails`},
+		},
+		{
+			name:    "a scalar id does not keep it",
+			disk:    guardrailGuardDisk,
+			json:    `{"plan.guardrails":{"a":"oops","b":{"severity":"warning"}}}`,
+			wantMsg: []string{`key "plan.guardrails" would remove guardrails [a] from plan.guardrails`},
+		},
+		{
+			name:    "an array id does not keep it",
+			disk:    guardrailGuardDisk,
+			json:    `{"plan.guardrails":{"a":[1],"b":{"severity":"warning"}}}`,
+			wantMsg: []string{`key "plan.guardrails" would remove guardrails [a] from plan.guardrails`},
+		},
+		{
+			name:    "dotted key in a section value keeps only its id",
+			disk:    guardrailGuardDisk,
+			json:    `{"plan":{"guardrails.a":{"severity":"error"}}}`,
+			wantMsg: []string{`key "plan" would remove guardrails [b] from plan.guardrails`},
+		},
+		{
+			name:     "dotted keys in a section value keep both ids",
+			disk:     guardrailGuardDisk,
+			json:     `{"plan":{"guardrails.a":{"severity":"error"},"guardrails.b":{"severity":"warning"}}}`,
+			wantFile: []string{"[plan.guardrails.a]", "[plan.guardrails.b]"},
+		},
+		{
+			name:    "dotted field key in a table value keeps only its id",
+			disk:    guardrailGuardDisk,
+			json:    `{"plan.guardrails":{"a.severity":"warning"}}`,
+			wantMsg: []string{`key "plan.guardrails" would remove guardrails [b] from plan.guardrails`},
+		},
+		{
+			name:     "dotted field keys in a table value keep both ids",
+			disk:     guardrailGuardDisk,
+			json:     `{"plan.guardrails":{"a.severity":"warning","b.severity":"error"}}`,
+			wantFile: []string{"[plan.guardrails.a]", "[plan.guardrails.b]"},
+		},
+		{
+			name:    "array form with two entries of id a lists a once",
+			disk:    "[[plan.guardrails]]\nid = \"a\"\n\n[[plan.guardrails]]\nid = \"a\"\nseverity = \"error\"\n",
+			json:    `{"plan.guardrails":{}}`,
+			wantMsg: []string{"would remove guardrails [a] from plan.guardrails"},
+		},
+		{
+			name:    "one-id key of the dropped id in the same section does not keep it",
+			disk:    guardrailGuardDisk,
+			json:    `{"plan.guardrails":{"a":{"severity":"error"}},"plan.guardrails.b":{"severity":"warning"}}`,
+			wantMsg: []string{`key "plan.guardrails" would remove guardrails [b] from plan.guardrails`, "Nothing was written."},
+		},
+		{
+			name:    "one-id key and a refused key in one call",
+			disk:    guardrailGuardDisk,
+			json:    `{"execute.guardrails.x":{"severity":"error"},"plan.guardrails":{"a":{"severity":"error"}},"style":{"foo":"bar"}}`,
+			wantMsg: []string{`key "plan.guardrails" would remove guardrails [b] from plan.guardrails`},
+		},
+		{
+			name:     "config.toml absent",
+			json:     `{"plan.guardrails":{"a":{"severity":"error","description":"d"}}}`,
+			wantFile: []string{"[plan.guardrails.a]"},
+		},
+		{
+			name:        "plan.guardrails is a string on disk",
+			disk:        "[plan]\nguardrails = \"x\"\n",
+			json:        `{"plan.guardrails":{"a":{"severity":"error","description":"d"}}}`,
+			wantFile:    []string{"[plan.guardrails.a]"},
+			notWantFile: []string{`guardrails = "x"`, "guardrails = 'x'"},
+		},
+		{
+			name:        "plan is a string on disk",
+			disk:        "plan = \"x\"\n",
+			json:        `{"plan":{"guardrails":{"a":{"severity":"error","description":"d"}}}}`,
+			wantFile:    []string{"[plan.guardrails.a]"},
+			notWantFile: []string{`plan = "x"`, "plan = 'x'"},
+		},
+		{
+			name:    "array form where one entry is not a table and one has no id",
+			disk:    "[plan]\nguardrails = [{ id = \"a\", severity = \"error\" }, \"junk\", { severity = \"warning\" }, { id = \"b\" }]\n",
+			json:    `{"plan.guardrails":{"b":{"severity":"warning"}}}`,
+			wantMsg: []string{"would remove guardrails [a] from plan.guardrails"},
+		},
+		{
+			name:    "plan value whose guardrails is an array of tables keeps its ids",
+			disk:    guardrailGuardDisk,
+			json:    `{"plan":{"guardrails":[{"id":"a"}]}}`,
+			wantMsg: []string{`key "plan" would remove guardrails [b] from plan.guardrails`},
+		},
+		{
+			name:        "whole-table key and one-id key for the same id",
+			disk:        guardrailGuardDisk,
+			json:        `{"plan.guardrails":{"a":{"severity":"error","description":"X"},"b":{"severity":"warning"}},"plan.guardrails.a":{"severity":"warning","description":"Y"}}`,
+			wantFile:    []string{"description = 'Y'"},
+			notWantFile: []string{"description = 'X'"},
+		},
+		{
+			name: "two refused keys",
+			disk: guardrailGuardDisk,
+			json: `{"plan.guardrails":{},"execute.guardrails":{}}`,
+			wantMsg: []string{
+				`key "execute.guardrails" would remove guardrails [a b] from execute.guardrails and key "plan.guardrails" would remove guardrails [a b] from plan.guardrails.`,
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, ".sdlc-v2", "config.toml")
+			if tt.disk != "" {
+				writeSDLCFile(t, dir, "config.toml", tt.disk)
+			}
+			before := guardrailListing(t, dir)
+
+			out, err := setupWriteSections(dir, dir, SetupWriteSectionsIn{SectionsJSON: tt.json})
+
+			if len(tt.wantMsg) > 0 {
+				var de *mcpserver.DomainError
+				if !errors.As(err, &de) {
+					t.Fatalf("want *mcpserver.DomainError, got %T: %v (out %+v)", err, err, out)
+				}
+				for _, want := range tt.wantMsg {
+					if !strings.Contains(de.Msg, want) {
+						t.Errorf("message = %q, want it to hold %q", de.Msg, want)
+					}
+				}
+				for _, want := range tt.wantSuggestion {
+					if !strings.Contains(de.Suggestion, want) {
+						t.Errorf("Suggestion = %q, want it to hold %q", de.Suggestion, want)
+					}
+				}
+				if strings.Contains(de.Msg, "[a a]") {
+					t.Errorf("message lists an id twice: %q", de.Msg)
+				}
+				if tt.disk != "" {
+					got, readErr := os.ReadFile(path)
+					if readErr != nil {
+						t.Fatal(readErr)
+					}
+					if string(got) != tt.disk {
+						t.Errorf("config.toml changed after a refusal:\n%s", got)
+					}
+				}
+				if after := guardrailListing(t, dir); !slices.Equal(before, after) {
+					t.Errorf(".sdlc-v2 holds %q after a refusal, want %q", after, before)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("setupWriteSections: %v", err)
+			}
+			if !out.OK {
+				t.Fatalf("out = %+v, want ok", out)
+			}
+			got, readErr := os.ReadFile(path)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			for _, want := range tt.wantFile {
+				if !strings.Contains(string(got), want) {
+					t.Errorf("config.toml missing %q:\n%s", want, got)
+				}
+			}
+			for _, notWant := range tt.notWantFile {
+				if strings.Contains(string(got), notWant) {
+					t.Errorf("config.toml holds %q:\n%s", notWant, got)
+				}
+			}
+		})
+	}
+}
+
+// TestSetupWriteSections_GuardrailGuardRunsAfterEarlierChecks pins the order of
+// the checks: the unknown-key check and the target "user" check refuse a call
+// before the guard reads config.toml, so their message wins over the guard
+// message even when the whole-table key would also drop an id.
+func TestSetupWriteSections_GuardrailGuardRunsAfterEarlierChecks(t *testing.T) {
+	tests := []struct {
+		name    string
+		in      SetupWriteSectionsIn
+		wantMsg string
+	}{
+		{
+			name:    "unknown key",
+			in:      SetupWriteSectionsIn{SectionsJSON: `{"plan.guardrails":{"a":{"severity":"error"}},"bogus":{"x":1}}`},
+			wantMsg: "unknown section keys",
+		},
+		{
+			name:    "project key with target user",
+			in:      SetupWriteSectionsIn{SectionsJSON: `{"plan.guardrails":{"a":{"severity":"error"}}}`, Target: "user"},
+			wantMsg: `cannot use target "user"`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := writeSDLCFile(t, dir, "config.toml", guardrailGuardDisk)
+
+			_, err := setupWriteSections(dir, dir, tt.in)
+
+			var de *mcpserver.DomainError
+			if !errors.As(err, &de) {
+				t.Fatalf("want *mcpserver.DomainError, got %T: %v", err, err)
+			}
+			if !strings.Contains(de.Msg, tt.wantMsg) {
+				t.Errorf("Msg = %q, want it to contain %q", de.Msg, tt.wantMsg)
+			}
+			if strings.Contains(de.Msg, "would remove guardrails") {
+				t.Errorf("Msg = %q, the guard message must not win over the earlier check", de.Msg)
+			}
+			got, readErr := os.ReadFile(path)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if string(got) != guardrailGuardDisk {
+				t.Errorf("config.toml changed:\n%s", got)
+			}
+		})
+	}
+}
+
+// TestSetupWriteSections_KeyInsideArrayFormIsRefused pins that a key inside a
+// guardrails table that config.toml holds as an array of tables is refused
+// before any write. Without the refusal, config.WriteSection replaces the
+// whole array, so a file with no comment line loses the other entries.
+func TestSetupWriteSections_KeyInsideArrayFormIsRefused(t *testing.T) {
+	const executeArray = "[[execute.guardrails]]\nid = \"a\"\nseverity = \"error\"\n"
+	tests := []struct {
+		name    string
+		disk    string
+		json    string
+		wantMsg []string
+	}{
+		{"one-id key, no comment line", guardrailGuardArrayDisk, `{"plan.guardrails.c":{"severity":"warning","description":"d"}}`,
+			[]string{`keys ["plan.guardrails.c"] write inside plan.guardrails`, "as an array of tables ([[plan.guardrails]])"}},
+		{"one-id key, with a comment line", "# project guardrails\n" + guardrailGuardArrayDisk, `{"plan.guardrails.a":{"severity":"warning","description":"d"}}`,
+			[]string{`keys ["plan.guardrails.a"] write inside plan.guardrails`}},
+		{"null on a one-id key", guardrailGuardArrayDisk, `{"plan.guardrails.a":null}`,
+			[]string{`keys ["plan.guardrails.a"]`}},
+		{"field key inside an entry", guardrailGuardArrayDisk, `{"plan.guardrails.a.severity":{"x":1}}`,
+			[]string{`keys ["plan.guardrails.a.severity"]`}},
+		{"execute section", executeArray, `{"execute.guardrails.b":{"severity":"warning","description":"d"}}`,
+			[]string{`keys ["execute.guardrails.b"] write inside execute.guardrails`, "([[execute.guardrails]])"}},
+		{"two sections", guardrailGuardArrayDisk + "\n" + executeArray, `{"execute.guardrails.b":{"severity":"warning"},"plan.guardrails.c":{"severity":"warning"}}`,
+			[]string{`keys ["execute.guardrails.b"] write inside execute.guardrails`, ` and keys ["plan.guardrails.c"] write inside plan.guardrails`}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := writeSDLCFile(t, dir, "config.toml", tt.disk)
+
+			_, err := setupWriteSections(dir, dir, SetupWriteSectionsIn{SectionsJSON: tt.json})
+
+			var de *mcpserver.DomainError
+			if !errors.As(err, &de) {
+				t.Fatalf("want *mcpserver.DomainError, got %T: %v", err, err)
+			}
+			for _, want := range append(tt.wantMsg, "Nothing was written.") {
+				if !strings.Contains(de.Msg, want) {
+					t.Errorf("Msg = %q, want it to hold %q", de.Msg, want)
+				}
+			}
+			if !strings.Contains(de.Suggestion, "convert each [[") || !strings.Contains(de.Suggestion, path) {
+				t.Errorf("Suggestion = %q, want the conversion step for %s", de.Suggestion, path)
+			}
+			got, readErr := os.ReadFile(path)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if string(got) != tt.disk {
+				t.Errorf("config.toml changed:\n%s", got)
+			}
+		})
+	}
+}
+
+// TestSetupWriteSections_OneIDKeyOnNamedFormKeepsOtherIDs pins that a one-id
+// key on the named-table form replaces only its own id.
+func TestSetupWriteSections_OneIDKeyOnNamedFormKeepsOtherIDs(t *testing.T) {
+	dir := t.TempDir()
+	path := writeSDLCFile(t, dir, "config.toml", guardrailGuardDisk)
+
+	out, err := setupWriteSections(dir, dir, SetupWriteSectionsIn{SectionsJSON: `{"plan.guardrails.c":{"severity":"warning","description":"d"}}`})
+	if err != nil || !out.OK {
+		t.Fatalf("out = %+v, err = %v, want ok", out, err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"[plan.guardrails.a]", "[plan.guardrails.b]", "[plan.guardrails.c]", "[execute.guardrails.a]", "[execute.guardrails.b]"} {
+		if !strings.Contains(string(got), want) {
+			t.Errorf("config.toml missing %q:\n%s", want, got)
+		}
+	}
+}
+
+// TestSetupWriteSections_GuardrailGuardEachWholeTableKey runs every whole-table
+// key, with an empty value and with a null, against a config.toml that holds
+// ids a and b in both sections. Each call must be refused for its own section.
+func TestSetupWriteSections_GuardrailGuardEachWholeTableKey(t *testing.T) {
+	keys := map[string]string{"plan": "plan", "plan.guardrails": "plan", "execute": "execute", "execute.guardrails": "execute"}
+	for key, section := range keys {
+		for _, value := range []string{"{}", "null"} {
+			t.Run(key+" "+value, func(t *testing.T) {
+				dir := t.TempDir()
+				path := writeSDLCFile(t, dir, "config.toml", guardrailGuardDisk)
+
+				_, err := setupWriteSections(dir, dir, SetupWriteSectionsIn{SectionsJSON: `{"` + key + `":` + value + `}`})
+
+				var de *mcpserver.DomainError
+				if !errors.As(err, &de) {
+					t.Fatalf("want *mcpserver.DomainError, got %T: %v", err, err)
+				}
+				want := `key "` + key + `" would remove guardrails [a b] from ` + section + `.guardrails.`
+				if de.Msg != "setup_write_sections: "+want+" Nothing was written." {
+					t.Errorf("Msg = %q, want it to be about %q only", de.Msg, want)
+				}
+				if got, _ := os.ReadFile(path); string(got) != guardrailGuardDisk {
+					t.Errorf("config.toml changed:\n%s", got)
+				}
+			})
+		}
+	}
+}
+
+// TestSetupWriteSections_GuardrailGuardReadsContentRoot pins that the guard
+// reads config.toml under contentRoot, where the write goes, and not under
+// stateRoot.
+func TestSetupWriteSections_GuardrailGuardReadsContentRoot(t *testing.T) {
+	const call = `{"plan.guardrails":{"x":{"severity":"error","description":"d"}}}`
+	t.Run("ids under contentRoot refuse the call", func(t *testing.T) {
+		contentRoot, stateRoot := t.TempDir(), t.TempDir()
+		writeSDLCFile(t, contentRoot, "config.toml", guardrailGuardDisk)
+
+		_, err := setupWriteSections(contentRoot, stateRoot, SetupWriteSectionsIn{SectionsJSON: call})
+		var de *mcpserver.DomainError
+		if !errors.As(err, &de) || !strings.Contains(de.Msg, "would remove guardrails [a b]") {
+			t.Fatalf("err = %v, want the guardrail refusal", err)
+		}
+	})
+	t.Run("ids under stateRoot only do not refuse the call", func(t *testing.T) {
+		contentRoot, stateRoot := t.TempDir(), t.TempDir()
+		statePath := writeSDLCFile(t, stateRoot, "config.toml", guardrailGuardDisk)
+
+		out, err := setupWriteSections(contentRoot, stateRoot, SetupWriteSectionsIn{SectionsJSON: call})
+		if err != nil || !out.OK {
+			t.Fatalf("out = %+v, err = %v, want ok", out, err)
+		}
+		if got, _ := os.ReadFile(statePath); string(got) != guardrailGuardDisk {
+			t.Errorf("config.toml under stateRoot changed:\n%s", got)
+		}
+		if got, _ := os.ReadFile(filepath.Join(contentRoot, ".sdlc-v2", "config.toml")); !strings.Contains(string(got), "[plan.guardrails.x]") {
+			t.Errorf("config.toml under contentRoot = %q, want the new id", got)
+		}
+	})
+}
+
+// TestSetupWriteSections_WholeTableWriteKeepsTemplate pins that a whole-table
+// guardrail write that keeps every id of the real config template keeps every
+// comment line and every id, and adds the new id.
+func TestSetupWriteSections_WholeTableWriteKeepsTemplate(t *testing.T) {
+	var tmpl map[string]any
+	if err := fsx.DecodeTOML([]byte(configTemplate), &tmpl); err != nil {
+		t.Fatal(err)
+	}
+	plan, _ := tmpl["plan"].(map[string]any)
+	guardrails, _ := plan["guardrails"].(map[string]any)
+	if len(guardrails) == 0 {
+		t.Fatal("the config template has no plan guardrails")
+	}
+	value := map[string]any{"zz-new": map[string]any{"severity": "warning", "description": "d"}}
+	for id, entry := range guardrails {
+		value[id] = entry
+	}
+	call, err := json.Marshal(map[string]any{"plan.guardrails": value})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	path := writeSDLCFile(t, dir, "config.toml", configTemplate)
+
+	out, err := setupWriteSections(dir, dir, SetupWriteSectionsIn{SectionsJSON: string(call)})
+	if err != nil || !out.OK {
+		t.Fatalf("out = %+v, err = %v, want ok", out, err)
+	}
+	if len(out.Warnings) != 0 {
+		t.Errorf("warnings = %q, want none (no full rewrite)", out.Warnings)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(configTemplate, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "#") && !strings.Contains(string(got), line) {
+			t.Errorf("comment line lost: %q", line)
+		}
+	}
+	for id := range value {
+		if !strings.Contains(string(got), "[plan.guardrails."+id+"]") {
+			t.Errorf("config.toml missing guardrail %q", id)
+		}
+	}
+}
+
+// TestGuardrailIDsOfMatchConfigDecoder pins that guardrailIDsOf returns the
+// ids that the decoder of config.toml gives: the sorted, unique, non-empty
+// string id of each table entry in config.ReadSection(dir, "plan")["guardrails"].
+func TestGuardrailIDsOfMatchConfigDecoder(t *testing.T) {
+	tests := []struct {
+		name string
+		disk string
+	}{
+		{"named tables", "[plan.guardrails.b]\nseverity = \"error\"\n\n[plan.guardrails.a]\nseverity = \"warning\"\n"},
+		{"array of tables", guardrailGuardArrayDisk},
+		{"array of tables with an entry that has no id", "[[plan.guardrails]]\nid = \"a\"\n\n[[plan.guardrails]]\nseverity = \"warning\"\n"},
+		{"named tables with a scalar key", "[plan.guardrails]\nscalar = 1\n\n[plan.guardrails.b]\nseverity = \"error\"\n"},
+		{"array of tables with a duplicate id", "[[plan.guardrails]]\nid = \"a\"\n\n[[plan.guardrails]]\nid = \"a\"\nseverity = \"error\"\n"},
+		{"array with a non-table, an empty id and a number id", "[plan]\nguardrails = [{ id = \"a\" }, \"junk\", { id = \"\" }, { id = 1 }, { id = \"b\" }]\n"},
+		{"guardrails is a string", "[plan]\nguardrails = \"x\"\n"},
+		{"no guardrails", "[plan]\nx = 1\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := writeSDLCFile(t, dir, "config.toml", tt.disk)
+
+			plan, err := config.ReadSection(dir, "plan")
+			if err != nil {
+				t.Fatalf("config.ReadSection: %v", err)
+			}
+			entries, _ := plan["guardrails"].([]any)
+			want := []string{}
+			for _, entry := range entries {
+				if m, ok := entry.(map[string]any); ok {
+					if id, ok := m["id"].(string); ok && id != "" {
+						want = append(want, id)
+					}
+				}
+			}
+			slices.Sort(want)
+			want = slices.Compact(want)
+
+			var raw map[string]any
+			if err := fsx.ReadTOML(path, &raw); err != nil {
+				t.Fatal(err)
+			}
+			if got := guardrailIDsOf(sectionGuardrails(raw, "plan")); !slices.Equal(got, want) {
+				t.Errorf("guardrailIDsOf = %q, the decoder gives %q", got, want)
+			}
+		})
+	}
+}
+
+// TestToolErrorSites_SetupWriteGuardrailGuard covers the four error sites of
+// the guardrail check: the stat error, the read error, invalid TOML and a
+// config.toml over the size limit. Each returns the right error class with a
+// Suggestion and writes no byte.
+func TestToolErrorSites_SetupWriteGuardrailGuard(t *testing.T) {
+	const call = `{"plan.guardrails":{"a":{"severity":"error"}}}`
+	toolErrSiteRun(t, []toolErrSiteCase{
+		{
+			name:  "stat error",
+			class: toolErrInfra,
+			run: func(t *testing.T) ([]string, error) {
+				dir := t.TempDir()
+				toolErrSiteBlock(t, filepath.Join(dir, ".sdlc-v2"))
+				_, err := setupWriteSections(dir, dir, SetupWriteSectionsIn{SectionsJSON: call})
+				return []string{"config.toml", "Nothing was written"}, err
+			},
+		},
+		{
+			name:  "read error",
+			class: toolErrInfra,
+			run: func(t *testing.T) ([]string, error) {
+				dir := t.TempDir()
+				toolErrSiteDir(t, filepath.Join(dir, ".sdlc-v2", "config.toml"))
+				_, err := setupWriteSections(dir, dir, SetupWriteSectionsIn{SectionsJSON: call})
+				return []string{"config.toml", "Nothing was written"}, err
+			},
+		},
+		{
+			name:  "invalid TOML",
+			class: toolErrData,
+			run: func(t *testing.T) ([]string, error) {
+				dir := t.TempDir()
+				const bad = "[plan.guardrails\nseverity = \n"
+				path := writeSDLCFile(t, dir, "config.toml", bad)
+				_, err := setupWriteSections(dir, dir, SetupWriteSectionsIn{SectionsJSON: call})
+				if got, readErr := os.ReadFile(path); readErr != nil || string(got) != bad {
+					t.Errorf("config.toml changed after the error (read err %v):\n%s", readErr, got)
+				}
+				return []string{"Fix the TOML syntax", "config.toml", "Nothing was written"}, err
+			},
+		},
+		{
+			name:  "invalid TOML on a one-id key",
+			class: toolErrData,
+			run: func(t *testing.T) ([]string, error) {
+				dir := t.TempDir()
+				writeSDLCFile(t, dir, "config.toml", "[plan.guardrails\nseverity = \n")
+				_, err := setupWriteSections(dir, dir, SetupWriteSectionsIn{SectionsJSON: `{"plan.guardrails.a":{"severity":"error"}}`})
+				return []string{"Fix the TOML syntax", "Nothing was written"}, err
+			},
+		},
+		{
+			name:  "over the size limit",
+			class: toolErrData,
+			run: func(t *testing.T) ([]string, error) {
+				dir := t.TempDir()
+				big := strings.Repeat("#", maxCheckedFileBytes+1)
+				path := writeSDLCFile(t, dir, "config.toml", big)
+				_, err := setupWriteSections(dir, dir, SetupWriteSectionsIn{SectionsJSON: call})
+				wantMsg := fmt.Sprintf("is %d bytes, over the %d byte limit", maxCheckedFileBytes+1, maxCheckedFileBytes)
+				if err == nil || !strings.Contains(err.Error(), wantMsg) {
+					t.Errorf("error = %v, want it to hold %q", err, wantMsg)
+				}
+				if got, readErr := os.ReadFile(path); readErr != nil || len(got) != len(big) {
+					t.Errorf("config.toml changed after the error (read err %v, %d bytes)", readErr, len(got))
+				}
+				return []string{fmt.Sprintf("Reduce %s to %d bytes or less", path, maxCheckedFileBytes), "Nothing was written"}, err
+			},
+		},
+	})
+
+	t.Run("at the size limit the check reads the file", func(t *testing.T) {
+		dir := t.TempDir()
+		writeSDLCFile(t, dir, "config.toml", strings.Repeat("#", maxCheckedFileBytes))
+		if _, err := setupWriteSections(dir, dir, SetupWriteSectionsIn{SectionsJSON: call}); err != nil {
+			t.Errorf("setupWriteSections at the limit: %v, want no error", err)
+		}
+	})
 }

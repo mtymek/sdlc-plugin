@@ -2423,10 +2423,12 @@ func classifyDimensionMessage(msg string) (id, severity string) {
 // Exported wrappers (Task 38) -- internal/hooks needs to call these
 // validators directly (post-tool-validate.js's in-process port), but Go
 // visibility makes the unexported functions above uncallable cross-package.
-// Each wrapper is a pure one-line delegate; the unexported functions and the
-// validate dispatcher above are unchanged.
+// ValidatePRTemplate and ValidateDimensionsAction are one-line delegates.
+// ValidateGuardrailsAction also runs each guardrail section and adds the
+// section and the config file to each finding. The unexported functions and
+// the validate dispatcher above are unchanged.
 //
-// Two wrappers live here, both called from internal/hooks/post_tool_validate.go.
+// Three wrappers live here, all called from internal/hooks/post_tool_validate.go.
 // The hook's plan_format entry point is NOT one of them: it is
 // ValidatePlanFormatForHook above, which splits blocking from final-only
 // findings and reuses one read of the plan. A plain ValidatePlanFormat
@@ -2441,6 +2443,27 @@ func ValidatePRTemplate(root string) ([]discovery.Finding, error) {
 // ValidateDimensionsAction delegates to validateDimensionsAction for internal/hooks.
 func ValidateDimensionsAction(root string) ([]discovery.Finding, error) {
 	return validateDimensionsAction(root, "")
+}
+
+// ValidateGuardrailsAction runs the guardrails check for the plan section and
+// the execute section under root, for internal/hooks. The check sets neither
+// the section nor the file, so each finding gets the section in its message
+// and the config file in Path.
+func ValidateGuardrailsAction(root string) ([]discovery.Finding, error) {
+	configPath := filepath.Join(root, paths.DataDir, paths.ConfigFile)
+	var all []discovery.Finding
+	for _, section := range config.GuardrailSections {
+		findings, err := validateGuardrailsAction(root, ValidateIn{Section: section})
+		if err != nil {
+			return nil, err
+		}
+		for _, f := range findings {
+			f.Message = fmt.Sprintf("[%s.guardrails] %s", section, f.Message)
+			f.Path = configPath
+			all = append(all, f)
+		}
+	}
+	return all, nil
 }
 
 // validateDimensionsAction checks the review-dimension files under root. A
