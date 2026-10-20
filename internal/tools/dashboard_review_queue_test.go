@@ -304,22 +304,164 @@ func TestDashboardReviewQueue_RowSources(t *testing.T) {
 
 // TestDashboardReviewQueue_FixTwin checks that a deferred finding with the
 // same file, line and title as a fix record shows as the fix record only, and
-// that a near miss keeps its own row.
+// that a near miss on the line or the file keeps its own row. A deferred
+// finding with another title on a file and line that hold one fix record is
+// also a twin.
 func TestDashboardReviewQueue_FixTwin(t *testing.T) {
 	fixes := []DashboardFix{dashQueueFix("Nil map write", "fixing", "local-review", "a.go", 42)}
 	data := map[string]any{"deferredFindings": []any{
 		dashQueueDeferred("Nil map write", "below-threshold", "a.go", 42),  // twin
 		dashQueueDeferred("Nil map write", "below-threshold", "a.go", 43),  // other line
 		dashQueueDeferred("Nil map write", "below-threshold", "z.go", 42),  // other file
-		dashQueueDeferred("Nil map writes", "below-threshold", "a.go", 42), // other title
+		dashQueueDeferred("Nil map writes", "below-threshold", "a.go", 42), // other title, only fix row on a.go:42: twin
 	}}
 	q, _ := dashboardReviewQueue(data, dashQueueTotals(5, 0), fixes)
-	if got, want := dashQueueRowStatuses(q), []string{"fixing", "below", "below", "below"}; !reflect.DeepEqual(got, want) {
+	if got, want := dashQueueRowStatuses(q), []string{"fixing", "below", "below"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("statuses = %v, want %v", got, want)
 	}
 	if got := q.Rows[0]; got.Origin != "local-review" || got.Text != "" {
 		t.Errorf("fix row = %+v, want the fix record, not the deferred entry", got)
 	}
+}
+
+// TestDashboardReviewQueue_DeferredIDTwin checks that a deferred finding with
+// the deferredId of a fix record shows as the fix record only, even when its
+// file, line and title differ, and that an empty deferredId never pairs.
+func TestDashboardReviewQueue_DeferredIDTwin(t *testing.T) {
+	t.Run("same id pairs", func(t *testing.T) {
+		fix := dashQueueFix("Nil map write", "deferred", "local-review", "a.go", 10)
+		fix.DeferredID = "d-1"
+		other := dashQueueDeferred("Other finding", "below-threshold", "b.go", 98)
+		other["deferredId"] = "d-2"
+		twin := dashQueueDeferred("Nil map write guard", "below-threshold", "b.go", 99)
+		twin["deferredId"] = "d-1"
+		data := map[string]any{"deferredFindings": []any{twin, other}}
+
+		q, _ := dashboardReviewQueue(data, dashQueueTotals(2, 0), []DashboardFix{fix})
+		if got, want := dashQueueRowStatuses(q), []string{"deferred", "below"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("statuses = %v, want %v", got, want)
+		}
+		if got := q.Rows[1].Title; got != "Other finding" {
+			t.Errorf("second row title = %q, want the entry with another id", got)
+		}
+	})
+
+	t.Run("empty id never pairs", func(t *testing.T) {
+		fix := dashQueueFix("Nil map write", "fixing", "local-review", "a.go", 10)
+		noID := dashQueueDeferred("No id", "below-threshold", "b.go", 1)
+		emptyID := dashQueueDeferred("Empty id", "below-threshold", "b.go", 2)
+		emptyID["deferredId"] = ""
+		data := map[string]any{"deferredFindings": []any{noID, emptyID}}
+
+		q, _ := dashboardReviewQueue(data, dashQueueTotals(3, 0), []DashboardFix{fix})
+		if got, want := dashQueueRowStatuses(q), []string{"fixing", "below", "below"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("statuses = %v, want %v", got, want)
+		}
+	})
+}
+
+// TestDashboardReviewQueue_LineFallbackNeedsNoDeferredID checks that the file
+// and line fallback pairs only a deferred finding with no deferredId. A
+// finding with a deferredId that no fix record carries keeps its own row.
+func TestDashboardReviewQueue_LineFallbackNeedsNoDeferredID(t *testing.T) {
+	tests := []struct {
+		name       string
+		fixID      string
+		deferredID string
+		want       []string
+	}{
+		{"other non-empty deferredId on the only fix record keeps the row", "d-1", "d-2", []string{"fixed", "deferred"}},
+		{"deferredId and a fix record with no deferredId keep the row", "", "d-2", []string{"fixed", "deferred"}},
+		{"no deferredId pairs with the only fix record on the line", "", "", []string{"fixed"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fix := dashQueueFix("Lint: unused var", "fixed", "local-review", "a.go", 42)
+			fix.DeferredID = tt.fixID
+			entry := dashQueueDeferred("Pick a retry policy", "needs-direction", "a.go", 42)
+			if tt.deferredID != "" {
+				entry["deferredId"] = tt.deferredID
+			}
+			data := map[string]any{"deferredFindings": []any{entry}}
+			q, _ := dashboardReviewQueue(data, dashQueueTotals(2, 0), []DashboardFix{fix})
+			if got := dashQueueRowStatuses(q); !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("statuses = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestDashboardReviewQueue_SameLineTwoFixes checks the file and line fallback:
+// a deferred finding with no deferredId and another title pairs with the fix
+// record only when exactly one fix record, of any status, is on its file and
+// line. Two fix
+// records on the line give no pairing. A finding with no line pairs with the
+// only fix record with no line on its file.
+func TestDashboardReviewQueue_SameLineTwoFixes(t *testing.T) {
+	t.Run("two fix records on the line keep the deferred row", func(t *testing.T) {
+		fixes := []DashboardFix{
+			dashQueueFix("First", "fixing", "local-review", "a.go", 42),
+			dashQueueFix("Second", "fixed", "local-review", "a.go", 42),
+		}
+		data := map[string]any{"deferredFindings": []any{dashQueueDeferred("Third", "below-threshold", "a.go", 42)}}
+		q, _ := dashboardReviewQueue(data, dashQueueTotals(3, 0), fixes)
+		if got, want := dashQueueRowStatuses(q), []string{"fixing", "fixed", "below"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("statuses = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("same title still pairs with two fix records on the line", func(t *testing.T) {
+		fixes := []DashboardFix{
+			dashQueueFix("First", "fixing", "local-review", "a.go", 42),
+			dashQueueFix("Second", "fixed", "local-review", "a.go", 42),
+		}
+		data := map[string]any{"deferredFindings": []any{dashQueueDeferred("Second", "below-threshold", "a.go", 42)}}
+		q, _ := dashboardReviewQueue(data, dashQueueTotals(2, 0), fixes)
+		if got, want := dashQueueRowStatuses(q), []string{"fixing", "fixed"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("statuses = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("a fix record of any status counts", func(t *testing.T) {
+		for _, status := range healingFixStatuses {
+			fixes := []DashboardFix{dashQueueFix("First", status, "local-review", "a.go", 42)}
+			data := map[string]any{"deferredFindings": []any{dashQueueDeferred("Other title", "below-threshold", "a.go", 42)}}
+			q, _ := dashboardReviewQueue(data, dashQueueTotals(1, 0), fixes)
+			if got, want := dashQueueRowStatuses(q), []string{status}; !reflect.DeepEqual(got, want) {
+				t.Errorf("status %q: statuses = %v, want %v", status, got, want)
+			}
+		}
+	})
+
+	t.Run("no line pairs with the only fix record with no line", func(t *testing.T) {
+		fixes := []DashboardFix{dashQueueFix("First", "fixing", "local-review", "a.go", 0)}
+		data := map[string]any{"deferredFindings": []any{dashQueueDeferred("Other title", "below-threshold", "a.go", 0)}}
+		q, _ := dashboardReviewQueue(data, dashQueueTotals(1, 0), fixes)
+		if got, want := dashQueueRowStatuses(q), []string{"fixing"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("statuses = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("two fix records with no line keep the deferred row", func(t *testing.T) {
+		fixes := []DashboardFix{
+			dashQueueFix("First", "fixing", "local-review", "a.go", 0),
+			dashQueueFix("Second", "fixed", "local-review", "a.go", 0),
+		}
+		data := map[string]any{"deferredFindings": []any{dashQueueDeferred("Third", "below-threshold", "a.go", 0)}}
+		q, _ := dashboardReviewQueue(data, dashQueueTotals(3, 0), fixes)
+		if got, want := dashQueueRowStatuses(q), []string{"fixing", "fixed", "below"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("statuses = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("a finding with a line does not pair with a fix record with no line", func(t *testing.T) {
+		fixes := []DashboardFix{dashQueueFix("First", "fixing", "local-review", "a.go", 0)}
+		data := map[string]any{"deferredFindings": []any{dashQueueDeferred("Other title", "below-threshold", "a.go", 42)}}
+		q, _ := dashboardReviewQueue(data, dashQueueTotals(2, 0), fixes)
+		if got, want := dashQueueRowStatuses(q), []string{"fixing", "below"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("statuses = %v, want %v", got, want)
+		}
+	})
 }
 
 // TestDashboardReviewQueue_Threshold checks that threshold is the

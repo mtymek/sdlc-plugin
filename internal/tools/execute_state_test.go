@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -122,6 +123,68 @@ func TestExecState_Init(t *testing.T) {
 	}
 	if _, statErr := os.Stat(filepath.Join(root, paths.DataDir, "config.toml.bak")); statErr == nil {
 		t.Error("config.toml.bak written for already-current config; want zero extra I/O")
+	}
+}
+
+// TestExecState_Init_SiblingKeepRule pins which older execute state files of
+// the same branch an init call deletes: an in-flight run of the same session
+// (or with no session) is deleted; a completed run and an in-flight run of
+// another session are kept.
+func TestExecState_Init_SiblingKeepRule(t *testing.T) {
+	tests := []struct {
+		name       string
+		sibling    string
+		callerSess string
+		wantOnDisk bool
+	}{
+		{"in-flight sibling without sessionId", `{"sessionId": null}`, "sess-new", false},
+		{"in-flight sibling of the same session", `{"sessionId": "sess-new"}`, "sess-new", false},
+		{"in-flight sibling of another session", `{"sessionId": "sess-old"}`, "sess-new", true},
+		{"completed sibling", `{"runStatus": "completed"}`, "sess-new", true},
+		{"in-flight sibling, caller without sessionId", `{"sessionId": "sess-old"}`, "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeFile(t, filepath.Join(root, paths.DataDir, "config.toml"), "")
+			writeFile(t, filepath.Join(root, paths.DataDir, "local.toml"), "")
+			sibling := filepath.Join(root, paths.DataDir, paths.RunsSubdir,
+				"execute-"+state.SlugifyBranch("feat/test")+"-20200101T000000Z.json")
+			writeFile(t, sibling, tt.sibling)
+
+			res, err := executeState(root, root, ExecuteStateIn{
+				Action:    "init",
+				Branch:    "feat/test",
+				Quality:   "balanced",
+				SessionID: tt.callerSess,
+			}, fixedClock(testNow))
+			if err != nil {
+				t.Fatalf("init: %v", err)
+			}
+			m, ok := res.(map[string]any)
+			if !ok {
+				t.Fatalf("init result is %T, want map[string]any", res)
+			}
+			pruned, ok := m["prunedOrphans"].([]string)
+			if !ok || pruned == nil {
+				t.Fatalf("prunedOrphans = %#v, want a non-nil []string", m["prunedOrphans"])
+			}
+			wantPruned := []string{}
+			if !tt.wantOnDisk {
+				wantPruned = []string{sibling}
+			}
+			if !slices.Equal(pruned, wantPruned) {
+				t.Errorf("prunedOrphans = %v, want %v", pruned, wantPruned)
+			}
+
+			_, statErr := os.Stat(sibling)
+			if tt.wantOnDisk && statErr != nil {
+				t.Errorf("sibling %s should still exist, got stat error: %v", sibling, statErr)
+			}
+			if !tt.wantOnDisk && !os.IsNotExist(statErr) {
+				t.Errorf("sibling %s still exists, want removed (stat err = %v)", sibling, statErr)
+			}
+		})
 	}
 }
 

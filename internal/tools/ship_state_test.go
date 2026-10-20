@@ -217,31 +217,91 @@ func TestShipState_Init(t *testing.T) {
 	}
 }
 
+// TestShipState_Init_PrunesOrphans verifies that prunedOrphans lists exactly
+// the files that state.Write deletes: a live sibling, and not a completed one
+// or a live one of another session.
 func TestShipState_Init_PrunesOrphans(t *testing.T) {
+	tests := []struct {
+		name       string
+		sibling    string
+		callerSess string
+		wantPruned bool
+	}{
+		{"live sibling without sessionId", `{"sessionId": null}`, "", true},
+		{"completed sibling", `{"pipelineStatus": "completed"}`, "", false},
+		{"completed dry-run sibling", `{"pipelineStatus": "completed", "flags": {"dryRun": true}}`, "", true},
+		{"live sibling of another session", `{"sessionId": "s1"}`, "s2", false},
+		{"live sibling with sessionId, caller without", `{"sessionId": "s1"}`, "", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			initGitFixture(t, dir)
+			gitCommit(t, dir, "initial")
+			checkoutBranch(t, dir, "feat/prune-me")
+
+			slug := state.SlugifyBranch("feat/prune-me")
+			orphan := filepath.Join(dir, paths.DataDir, paths.RunsSubdir, fmt.Sprintf("ship-%s-20200101T000000Z.json", slug))
+			writeFile(t, orphan, tt.sibling)
+
+			out, err := shipState(dir, dir, ShipStateIn{
+				Action:    "init",
+				SessionID: tt.callerSess,
+				Detail:    map[string]any{"branch": "feat/prune-me"},
+			}, fixedNow(time.Now()))
+			if err != nil {
+				t.Fatalf("init: %v", err)
+			}
+			m := out.(map[string]any)
+			pruned, ok := m["prunedOrphans"].([]string)
+			if !ok || pruned == nil {
+				t.Fatalf("prunedOrphans = %#v, want a non-nil []string", m["prunedOrphans"])
+			}
+			_, statErr := os.Stat(orphan)
+			if tt.wantPruned {
+				if len(pruned) != 1 || pruned[0] != orphan {
+					t.Errorf("prunedOrphans = %v, want [%s]", pruned, orphan)
+				}
+				if !os.IsNotExist(statErr) {
+					t.Errorf("sibling %s still exists after prune, stat err = %v, want os.IsNotExist", orphan, statErr)
+				}
+				return
+			}
+			if len(pruned) != 0 {
+				t.Errorf("prunedOrphans = %v, want empty", pruned)
+			}
+			assertJSONEmptyList(t, m, "prunedOrphans")
+			if statErr != nil {
+				t.Errorf("sibling %s should still exist, got stat error: %v", orphan, statErr)
+			}
+		})
+	}
+}
+
+// TestShipState_Init_PruneScanError verifies that a regular file at runs/
+// makes the prune scan fail with an InfraError that carries a Suggestion.
+func TestShipState_Init_PruneScanError(t *testing.T) {
 	dir := t.TempDir()
 	initGitFixture(t, dir)
 	gitCommit(t, dir, "initial")
-	checkoutBranch(t, dir, "feat/prune-me")
+	checkoutBranch(t, dir, "feat/scan-error")
+	writeFile(t, filepath.Join(dir, paths.DataDir, paths.RunsSubdir), "not a directory")
 
-	slug := state.SlugifyBranch("feat/prune-me")
-	orphan := filepath.Join(dir, paths.DataDir, paths.RunsSubdir, fmt.Sprintf("ship-%s-20200101T000000Z.json", slug))
-	writeFile(t, orphan, `{"sessionId": null}`)
-
-	out, err := shipState(dir, dir, ShipStateIn{
+	_, err := shipState(dir, dir, ShipStateIn{
 		Action: "init",
-		Detail: map[string]any{"branch": "feat/prune-me"},
+		Detail: map[string]any{"branch": "feat/scan-error"},
 	}, fixedNow(time.Now()))
-	if err != nil {
-		t.Fatalf("init: %v", err)
+	var infra *mcpserver.InfraError
+	if !errors.As(err, &infra) {
+		t.Fatalf("err = %v, want *mcpserver.InfraError", err)
 	}
-	m := out.(map[string]any)
-	pruned, _ := m["prunedOrphans"].([]string)
-	if len(pruned) != 1 || pruned[0] != orphan {
-		t.Errorf("prunedOrphans = %v, want [%s]", pruned, orphan)
+	if !strings.Contains(infra.Msg, "scan existing ship state files") || !strings.Contains(infra.Msg, "state: readdir for prune") {
+		t.Errorf("InfraError.Msg = %q, want the scan failure with the readdir error", infra.Msg)
 	}
-	if _, err := os.Stat(orphan); !os.IsNotExist(err) {
-		t.Errorf("orphan file %s still exists after prune, stat err = %v, want os.IsNotExist", orphan, err)
+	if !strings.Contains(infra.Suggestion, "retry ship_state init") {
+		t.Errorf("InfraError.Suggestion = %q, want a retry hint", infra.Suggestion)
 	}
+	assertInfraReaddirCause(t, infra)
 }
 
 // ---------------------------------------------------------------------------
@@ -5796,7 +5856,7 @@ func healingCall(t *testing.T, dir, branch string, detail map[string]any) string
 // TestShipStateHealingRecord_EchoesRecord pins the response fields a caller
 // uses to check what was stored: kind, written, and the record itself with
 // its generated recordedAt. A duplicate echoes the stored record with
-// written:false. The kinds other than fix-progress are terminal: next is nil.
+// written:false. Every kind returns next.
 func TestShipStateHealingRecord_EchoesRecord(t *testing.T) {
 	branch := "feat/heal-echo"
 	dir, path := deferFixture(t, branch)
@@ -5842,20 +5902,24 @@ func TestShipStateHealingRecord_EchoesRecord(t *testing.T) {
 	if dup.Record["title"] != "unchecked error" || dup.Record["recordedAt"] != "2026-09-30T01:02:03Z" {
 		t.Errorf("duplicate record = %v, want the stored record echoed", dup.Record)
 	}
-	if first.Next != nil || dup.Next != nil {
-		t.Errorf("fixed next = %+v / %+v, want nil", first.Next, dup.Next)
-	}
-	for _, d := range []map[string]any{
-		{"kind": "review-total", "total": float64(3), "dimensions": float64(2)},
-		healingHardenedDetail(nil),
+	wantFixNext(t, first, "Fix recorded. Continue the fix pass.")
+	wantFixNext(t, dup, "Fix already recorded. Continue the fix pass.")
+	for _, tc := range []struct {
+		detail          map[string]any
+		wantID, wantMsg string
+	}{
+		{map[string]any{"kind": "review-total", "total": float64(3), "dimensions": float64(2)},
+			"continue-after-review-total", "Review total stored. Run the per-finding review routing."},
+		{healingHardenedDetail(nil), "continue-harden", "Harden record stored. The harden run is finished. Return to the step that dispatched harden."},
 	} {
-		d["branch"] = branch
-		out, err := shipState(dir, dir, ShipStateIn{Action: "healing_record", Detail: d}, fixedNow(at))
+		tc.detail["branch"] = branch
+		out, err := shipState(dir, dir, ShipStateIn{Action: "healing_record", Detail: tc.detail}, fixedNow(at))
 		if err != nil {
-			t.Fatalf("healing_record %s: %v", d["kind"], err)
+			t.Fatalf("healing_record %s: %v", tc.detail["kind"], err)
 		}
-		if n, _ := out.(ShipHealingRecordOut); n.Next != nil {
-			t.Errorf("%s next = %+v, want nil", d["kind"], n.Next)
+		n, _ := out.(ShipHealingRecordOut)
+		if n.Next == nil || n.Next.ID != tc.wantID || n.Next.Instruction != tc.wantMsg {
+			t.Errorf("%s next = %+v, want id %q instruction %q", tc.detail["kind"], n.Next, tc.wantID, tc.wantMsg)
 		}
 	}
 }
@@ -6374,6 +6438,628 @@ func TestShipStateHealingRecord_FixedAppendsAndDedupes(t *testing.T) {
 	if v, ok := last["line"]; !ok || v != nil {
 		t.Errorf("no-line record line = %v (present %v), want stored null", v, ok)
 	}
+}
+
+// healingOut runs one healing_record call with detail at the time at and
+// returns the full response.
+func healingOut(t *testing.T, dir string, at time.Time, detail map[string]any) ShipHealingRecordOut {
+	t.Helper()
+	out, err := shipState(dir, dir, ShipStateIn{Action: "healing_record", Detail: detail}, fixedNow(at))
+	if err != nil {
+		t.Fatalf("healing_record %v: %v", detail["kind"], err)
+	}
+	n, ok := out.(ShipHealingRecordOut)
+	if !ok {
+		t.Fatalf("healing_record output = %T, want ShipHealingRecordOut", out)
+	}
+	return n
+}
+
+// fixedCall runs one kind fixed healing_record call on branch at the time at
+// and returns the full response.
+func fixedCall(t *testing.T, dir, branch string, at time.Time, overrides map[string]any) ShipHealingRecordOut {
+	t.Helper()
+	d := healingFixedDetail(overrides)
+	d["branch"] = branch
+	return healingOut(t, dir, at, d)
+}
+
+// seedHealing sets data.healing in the state file to healing.
+func seedHealing(t *testing.T, path string, healing map[string]any) {
+	t.Helper()
+	data := readStateData(t, path)
+	data["healing"] = healing
+	raw, err := json.Marshal(data)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+// fixRowSeed returns a fixProgress row for the finding of healingFixedDetail
+// with the given status, firstAt and updatedAt 2026-10-10T10:00:00Z, and the
+// overrides applied.
+func fixRowSeed(status string, overrides map[string]any) map[string]any {
+	row := map[string]any{
+		"origin": "local-review", "severity": "high", "file": "a.go", "line": float64(42),
+		"title": "unchecked error", "status": status,
+		"firstAt": "2026-10-10T10:00:00Z", "updatedAt": "2026-10-10T10:00:00Z",
+	}
+	for k, v := range overrides {
+		row[k] = v
+	}
+	return row
+}
+
+// TestShipStateHealingRecord_FixedOutcomeTable walks the outcome table of a
+// fixed call with no deferredId on a live run: the stored fix row, the
+// narration, written, next and fixRow, for a new fixed record and for a
+// repeat of a stored one. Every row checks the fixProgress list read back
+// from disk, and that Record echoes the stored fixed entry.
+func TestShipStateHealingRecord_FixedOutcomeTable(t *testing.T) {
+	const old, stamp = "2026-10-10T10:00:00Z", "2026-10-13T10:07:00Z"
+	at := time.Date(2026, 10, 13, 10, 7, 0, 0, time.UTC)
+	const recorded, already = "Fix recorded. Continue the fix pass.", "Fix already recorded. Continue the fix pass."
+	type outcome struct {
+		name        string
+		rows        []any // seeded fixProgress
+		storedFixed bool  // a fixed record with the same key is stored
+		want        []any // fixProgress after the call
+		wantNarr    string
+		wantWritten bool
+		wantNext    string
+		wantPrior   string // fixRow.prior; "" = no fixRow
+	}
+	var cases []outcome
+	for _, status := range []string{"queued", "fixing", "failed", "deferred"} {
+		rows := []any{fixRowSeed(status, nil)}
+		want := []any{fixRowSeed("fixed", map[string]any{"updatedAt": stamp})}
+		note := " Fix-progress row set to fixed (was " + status + ")."
+		cases = append(cases,
+			outcome{status + " row, new fixed record", rows, false, want, healingNarrRecorded, true,
+				"Fix recorded." + note + " Continue the fix pass.", status},
+			outcome{status + " row, repeat fixed record", rows, true, want, healingNarrRowFixed, true,
+				"Fix already recorded." + note + " Continue the fix pass.", status},
+		)
+	}
+	fixedRows := []any{fixRowSeed("fixed", nil)}
+	otherFile := []any{fixRowSeed("queued", map[string]any{"file": "b.go"})}
+	twoOpen := []any{fixRowSeed("queued", map[string]any{"title": "other one"}), fixRowSeed("fixing", map[string]any{"title": "other two"})}
+	cases = append(cases,
+		outcome{"fixed row, new fixed record", fixedRows, false, fixedRows, healingNarrRecorded, true, recorded, ""},
+		outcome{"fixed row, repeat fixed record", fixedRows, true, fixedRows, healingNarrDuplicate, false, already, ""},
+		outcome{"no matching row", otherFile, false, otherFile, healingNarrRecorded, true, recorded, ""},
+		outcome{"two open rows on the line, other titles", twoOpen, false, twoOpen, healingNarrRecorded, true, recorded, ""},
+	)
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			branch := "feat/heal-fixed-table"
+			dir, path := deferFixture(t, branch)
+			healing := map[string]any{"fixProgress": tc.rows}
+			if tc.storedFixed {
+				healing["fixed"] = []any{map[string]any{
+					"origin": "local-review", "severity": "high", "file": "a.go", "line": float64(42),
+					"title": "unchecked error", "recordedAt": old,
+				}}
+			}
+			seedHealing(t, path, healing)
+			before := shipErrReadFile(t, path)
+
+			out := fixedCall(t, dir, branch, at, nil)
+			if out.Kind != "fixed" || out.Written != tc.wantWritten {
+				t.Errorf("kind=%q written=%v, want fixed/%v", out.Kind, out.Written, tc.wantWritten)
+			}
+			if !strings.HasSuffix(out.Summary, ": "+tc.wantNarr) {
+				t.Errorf("summary = %q, want suffix %q", out.Summary, ": "+tc.wantNarr)
+			}
+			wantFixNext(t, out, tc.wantNext)
+			if out.DeferredID != "" || out.FixedInRun {
+				t.Errorf("deferredId=%q fixedInRun=%v, want empty/false", out.DeferredID, out.FixedInRun)
+			}
+			var wantRow *ShipHealingFixRowOut
+			if tc.wantPrior != "" {
+				wantRow = &ShipHealingFixRowOut{Status: "fixed", Prior: tc.wantPrior, UpdatedAt: stamp}
+			}
+			if !reflect.DeepEqual(out.FixRow, wantRow) {
+				t.Errorf("fixRow = %+v, want %+v", out.FixRow, wantRow)
+			}
+
+			got := healingData(t, path)
+			if progress, _ := got["fixProgress"].([]any); !reflect.DeepEqual(progress, tc.want) {
+				t.Errorf("fixProgress = %#v, want %#v", progress, tc.want)
+			}
+			fixed, _ := got["fixed"].([]any)
+			if len(fixed) != 1 {
+				t.Fatalf("fixed has %d records, want 1: %v", len(fixed), fixed)
+			}
+			wantAt := stamp
+			if tc.storedFixed {
+				wantAt = old
+			}
+			// Record always echoes the stored fixed entry; the row change is
+			// in fixRow.
+			if rec, _ := fixed[0].(map[string]any); rec["recordedAt"] != wantAt || out.Record["recordedAt"] != wantAt {
+				t.Errorf("stored recordedAt = %v, echoed %v, want %s for both", rec["recordedAt"], out.Record["recordedAt"], wantAt)
+			}
+			if !tc.wantWritten {
+				if after := shipErrReadFile(t, path); !bytes.Equal(before, after) {
+					t.Error("state file changed although written = false")
+				}
+			}
+		})
+	}
+}
+
+// TestShipStateHealingRecord_FixedTitleFallback pins the match rules that a
+// fixed call applies when the exact key finds no row: the only row with the
+// same file, line and title (any origin, any status), else the only queued or
+// fixing row with the same file and line. The matched row keeps its title.
+func TestShipStateHealingRecord_FixedTitleFallback(t *testing.T) {
+	const reworded = "reworded title"
+	cases := []struct {
+		name       string
+		rows       []any
+		wantStatus []string
+	}{
+		{"only queued row on the line", []any{fixRowSeed("queued", nil)}, []string{"fixed"}},
+		{"only fixing row on the line", []any{fixRowSeed("fixing", nil)}, []string{"fixed"}},
+		{"failed row on the line is not taken", []any{fixRowSeed("failed", nil)}, []string{"failed"}},
+		{"deferred row on the line is not taken", []any{fixRowSeed("deferred", nil)}, []string{"deferred"}},
+		{"queued row on another line", []any{fixRowSeed("queued", map[string]any{"line": float64(43)})}, []string{"queued"}},
+		{"queued row in another file", []any{fixRowSeed("queued", map[string]any{"file": "b.go"})}, []string{"queued"}},
+		{"queued row of another origin", []any{fixRowSeed("queued", map[string]any{"origin": "pr-comment"})}, []string{"fixed"}},
+		{"same title of another origin, final status", []any{fixRowSeed("failed", map[string]any{"origin": "pr-comment", "title": reworded})}, []string{"fixed"}},
+		{"open row and final row on the line", []any{fixRowSeed("failed", nil), fixRowSeed("queued", map[string]any{"title": "third"})}, []string{"failed", "fixed"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			branch := "feat/heal-fixed-title"
+			dir, path := deferFixture(t, branch)
+			seedFixProgress(t, path, tc.rows)
+
+			out := fixedCall(t, dir, branch, time.Date(2026, 10, 13, 10, 7, 0, 0, time.UTC), map[string]any{"title": reworded})
+			if !out.Written || !strings.HasSuffix(out.Summary, ": "+healingNarrRecorded) {
+				t.Errorf("written=%v summary=%q, want a recorded write", out.Written, out.Summary)
+			}
+			progress, _ := healingData(t, path)["fixProgress"].([]any)
+			if len(progress) != len(tc.rows) {
+				t.Fatalf("fixProgress has %d rows, want %d", len(progress), len(tc.rows))
+			}
+			for i, raw := range progress {
+				row, _ := raw.(map[string]any)
+				seed, _ := tc.rows[i].(map[string]any)
+				if row["status"] != tc.wantStatus[i] {
+					t.Errorf("row %d status = %v, want %s", i, row["status"], tc.wantStatus[i])
+				}
+				if row["title"] != seed["title"] || row["firstAt"] != seed["firstAt"] || row["severity"] != seed["severity"] {
+					t.Errorf("row %d = %v, want title, firstAt and severity of %v", i, row, seed)
+				}
+				wantUpdated := seed["updatedAt"]
+				if row["status"] != seed["status"] {
+					wantUpdated = "2026-10-13T10:07:00Z"
+				}
+				if row["updatedAt"] != wantUpdated {
+					t.Errorf("row %d updatedAt = %v, want %v", i, row["updatedAt"], wantUpdated)
+				}
+			}
+		})
+	}
+}
+
+// TestShipStateHealingRecord_FixedAmbiguousLine pins that a fixed call with a
+// title no row holds changes no row when two open rows share the line, and
+// that the exact key still picks its row from rows with the same title.
+func TestShipStateHealingRecord_FixedAmbiguousLine(t *testing.T) {
+	branch := "feat/heal-fixed-ambiguous"
+	at := time.Date(2026, 10, 13, 10, 7, 0, 0, time.UTC)
+
+	t.Run("two open rows on the line", func(t *testing.T) {
+		dir, path := deferFixture(t, branch)
+		rows := []any{fixRowSeed("queued", map[string]any{"title": "one"}), fixRowSeed("fixing", map[string]any{"title": "two"})}
+		seedFixProgress(t, path, rows)
+		out := fixedCall(t, dir, branch, at, map[string]any{"title": "three"})
+		if !out.Written || !strings.HasSuffix(out.Summary, ": "+healingNarrRecorded) {
+			t.Errorf("written=%v summary=%q, want a recorded write", out.Written, out.Summary)
+		}
+		if progress, _ := healingData(t, path)["fixProgress"].([]any); !reflect.DeepEqual(progress, rows) {
+			t.Errorf("fixProgress = %#v, want it unchanged: %#v", progress, rows)
+		}
+	})
+
+	t.Run("exact key beats a same-title row of another origin", func(t *testing.T) {
+		dir, path := deferFixture(t, branch)
+		rows := []any{fixRowSeed("queued", map[string]any{"origin": "pr-comment"}), fixRowSeed("queued", nil)}
+		seedFixProgress(t, path, rows)
+		fixedCall(t, dir, branch, at, nil)
+		progress, _ := healingData(t, path)["fixProgress"].([]any)
+		if len(progress) != 2 {
+			t.Fatalf("fixProgress has %d rows, want 2", len(progress))
+		}
+		other, _ := progress[0].(map[string]any)
+		exact, _ := progress[1].(map[string]any)
+		if other["status"] != "queued" || exact["status"] != "fixed" {
+			t.Errorf("statuses = %v / %v, want queued (other origin) / fixed (exact key)", other["status"], exact["status"])
+		}
+	})
+}
+
+// TestShipStateHealingRecord_FixedNoFixProgress pins that a fixed call never
+// creates a fixProgress row or key: with the key absent it stays absent, and
+// an empty list stays empty.
+func TestShipStateHealingRecord_FixedNoFixProgress(t *testing.T) {
+	branch := "feat/heal-fixed-no-progress"
+	at := time.Date(2026, 10, 13, 10, 7, 0, 0, time.UTC)
+
+	t.Run("key absent", func(t *testing.T) {
+		dir, path := deferFixture(t, branch)
+		out := fixedCall(t, dir, branch, at, nil)
+		if !out.Written || !strings.HasSuffix(out.Summary, ": "+healingNarrRecorded) {
+			t.Errorf("written=%v summary=%q, want a recorded write", out.Written, out.Summary)
+		}
+		wantFixNext(t, out, "Fix recorded. Continue the fix pass.")
+		healing := healingData(t, path)
+		if _, has := healing["fixProgress"]; has {
+			t.Errorf("healing = %v, want no fixProgress key", healing)
+		}
+		if fixed, _ := healing["fixed"].([]any); len(fixed) != 1 {
+			t.Errorf("fixed = %v, want 1 record", fixed)
+		}
+	})
+
+	t.Run("empty list", func(t *testing.T) {
+		dir, path := deferFixture(t, branch)
+		seedFixProgress(t, path, []any{})
+		fixedCall(t, dir, branch, at, nil)
+		progress, has := healingData(t, path)["fixProgress"].([]any)
+		if !has || len(progress) != 0 {
+			t.Errorf("fixProgress = %v (list %v), want an empty list", progress, has)
+		}
+	})
+}
+
+// TestShipStateHealingRecord_FixedDamagedFixProgress pins that a fixed call
+// with a fixProgress value that is not a list still writes the fixed record:
+// the damaged value stays as it is, and the summary, next and warnings carry
+// a warning that names the state file. With a deferredId the call also
+// resolves the deferred.json row and sets fixedInRun.
+func TestShipStateHealingRecord_FixedDamagedFixProgress(t *testing.T) {
+	for name, damaged := range map[string]any{"string": "oops", "null": nil, "object": map[string]any{}} {
+		for _, withID := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s, deferredId %v", name, withID), func(t *testing.T) {
+				branch := "feat/heal-fixed-damaged"
+				var dir, path, id string
+				if withID {
+					dir, path, id = deferredFixedFixture(t, branch)
+				} else {
+					dir, path = deferFixture(t, branch)
+				}
+				seedFixProgress(t, path, damaged)
+
+				var out ShipHealingRecordOut
+				if withID {
+					out = healingFixedOut(t, dir, branch, id, nil)
+				} else {
+					out = fixedCall(t, dir, branch, time.Date(2026, 10, 13, 10, 7, 0, 0, time.UTC), nil)
+				}
+				if !out.Written || out.FixRow != nil {
+					t.Errorf("written=%v fixRow=%+v, want a write and no fixRow", out.Written, out.FixRow)
+				}
+				wantWarn := "Fix-progress row not updated: data.healing.fixProgress in " + path +
+					" is not a list — the ship state is damaged. Tell the user to repair the ship state file " + path +
+					" (set the damaged key to {} or [], or remove it)."
+				if len(out.Warnings) != 1 || out.Warnings[0] != wantWarn {
+					t.Errorf("warnings = %q, want [%q]", out.Warnings, wantWarn)
+				}
+				if !strings.HasSuffix(out.Summary, ". "+wantWarn) {
+					t.Errorf("summary = %q, want suffix %q", out.Summary, ". "+wantWarn)
+				}
+				wantNext := "Fix recorded. Continue the fix pass. " + wantWarn
+				if withID {
+					wantNext = "deferred item " + id + " resolved. Continue the fix pass. " + wantWarn
+				}
+				wantFixNext(t, out, wantNext)
+
+				healing := healingData(t, path)
+				if !reflect.DeepEqual(healing["fixProgress"], damaged) {
+					t.Errorf("fixProgress = %#v, want it unchanged: %#v", healing["fixProgress"], damaged)
+				}
+				if fixed, _ := healing["fixed"].([]any); len(fixed) != 1 {
+					t.Errorf("fixed = %v, want 1 record", fixed)
+				}
+				if !withID {
+					return
+				}
+				if rows := storedDeferred(t, dir); len(rows) != 1 || rows[0].Status != history.StatusResolved {
+					t.Errorf("deferred.json rows = %+v, want the row resolved", rows)
+				}
+				if entry := deferredStateEntry(t, path, 0); entry["fixedInRun"] != true {
+					t.Errorf("deferredFindings[0] = %v, want fixedInRun true", entry)
+				}
+			})
+		}
+	}
+}
+
+// TestShipStateHealingRecord_FixedDeferredIDSetsRow pins that a fixed call
+// with a deferredId also sets the fix row to fixed, and that next still names
+// the deferred item.
+func TestShipStateHealingRecord_FixedDeferredIDSetsRow(t *testing.T) {
+	branch := "feat/heal-deferred-row"
+	dir, path, id := deferredFixedFixture(t, branch)
+	seedFixProgress(t, path, []any{fixRowSeed("queued", nil)})
+
+	out := healingFixedOut(t, dir, branch, id, nil)
+	wantFixNext(t, out, "deferred item "+id+" resolved. Continue the fix pass.")
+	progress, _ := healingData(t, path)["fixProgress"].([]any)
+	if row, _ := progress[0].(map[string]any); row["status"] != "fixed" || row["updatedAt"] != "2026-10-12T04:00:00Z" {
+		t.Errorf("row = %v, want status fixed and updatedAt 2026-10-12T04:00:00Z", row)
+	}
+}
+
+// TestShipStateHealingRecord_KindNext walks the outcomes of the kinds that
+// returned no next before: fixed with no live run and no deferredId,
+// review-total and hardened. Each outcome pins the next id and instruction.
+func TestShipStateHealingRecord_KindNext(t *testing.T) {
+	const branch = "feat/heal-kind-next"
+	at := time.Date(2026, 10, 13, 10, 7, 0, 0, time.UTC)
+	reviewTotal := map[string]any{"kind": "review-total", "total": float64(3), "dimensions": float64(2)}
+	started := healingHardenedDetail(map[string]any{"phase": "started"})
+	done := healingHardenedDetail(nil)
+	cases := []struct {
+		name     string
+		noLive   bool
+		setup    []map[string]any // calls made before the checked call
+		detail   map[string]any
+		wantNarr string
+		wantID   string
+		wantMsg  string
+	}{
+		{"fixed, no live run", true, nil, healingFixedDetail(nil), healingNarrNoLiveRun,
+			"continue-fix-pass", "No live ship run, so the fix is not stored. Continue the fix pass."},
+		{"review-total stored", false, nil, reviewTotal, healingNarrRecorded,
+			"continue-after-review-total", "Review total stored. Run the per-finding review routing."},
+		{"review-total, no live run", true, nil, reviewTotal, healingNarrNoLiveRun,
+			"continue-after-review-total", "No live ship run, so the review total is not stored. Run the per-finding review routing."},
+		{"hardened started recorded", false, nil, started, healingNarrRecorded,
+			"continue-harden", "Harden record stored. Continue the harden run. When it ends, record phase done with the same trigger."},
+		{"hardened started repeat", false, []map[string]any{started}, started, healingNarrDuplicate,
+			"continue-harden", "Harden record already stored. Continue the harden run. When it ends, record phase done with the same trigger."},
+		{"hardened started, no live run", true, nil, started, healingNarrNoLiveRun,
+			"continue-harden", "No live ship run, so the harden record is not stored. Continue the harden run. When it ends, record phase done with the same trigger."},
+		{"hardened done recorded", false, nil, done, healingNarrRecorded,
+			"continue-harden", "Harden record stored. The harden run is finished. Return to the step that dispatched harden."},
+		{"hardened replaced started record", false, []map[string]any{started}, done, healingNarrReplaced,
+			"continue-harden", "Harden record stored. The harden run is finished. Return to the step that dispatched harden."},
+		{"hardened done repeat", false, []map[string]any{done}, done, healingNarrDuplicate,
+			"continue-harden", "Harden record already stored. The harden run is finished. Return to the step that dispatched harden."},
+		{"hardened done, no live run", true, nil, done, healingNarrNoLiveRun,
+			"continue-harden", "No live ship run, so the harden record is not stored. The harden run is finished. Return to the step that dispatched harden."},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var dir string
+			if tc.noLive {
+				dir = t.TempDir()
+				initGitFixture(t, dir)
+				gitCommit(t, dir, "initial")
+				checkoutBranch(t, dir, branch)
+			} else {
+				dir, _ = deferFixture(t, branch)
+			}
+			call := func(detail map[string]any) ShipHealingRecordOut {
+				d := maps.Clone(detail)
+				d["branch"] = branch
+				return healingOut(t, dir, at, d)
+			}
+			for _, s := range tc.setup {
+				call(s)
+			}
+			out := call(tc.detail)
+			if !strings.HasSuffix(out.Summary, ": "+tc.wantNarr) {
+				t.Errorf("summary = %q, want suffix %q", out.Summary, ": "+tc.wantNarr)
+			}
+			if out.Next == nil || out.Next.ID != tc.wantID || out.Next.Instruction != tc.wantMsg {
+				t.Errorf("next = %+v, want id %q instruction %q", out.Next, tc.wantID, tc.wantMsg)
+			}
+		})
+	}
+}
+
+// TestHealingMatchFix walks the three match steps of healingMatchFix: the
+// exact key, the only row with the file, line and title, and the only open
+// row with the file and line. 0 or 2+ candidates at a step go to the next.
+func TestHealingMatchFix(t *testing.T) {
+	local, pr := healingOriginLocal, "pr-comment"
+	row := func(origin, title, status string, line any) any {
+		return map[string]any{"origin": origin, "file": "a.go", "line": line, "title": title, "status": status}
+	}
+	rec := func(origin, title string, line any) map[string]any {
+		return map[string]any{"origin": origin, "file": "a.go", "line": line, "title": title}
+	}
+	cases := []struct {
+		name      string
+		list      []any
+		rec       map[string]any
+		useOrigin bool
+		want      int
+	}{
+		{"empty list", nil, rec(local, "x", 42), true, -1},
+		{"exact key", []any{row(local, "x", "queued", float64(42))}, rec(local, "x", 42), true, 0},
+		{"exact key beats an earlier same-title row of another origin",
+			[]any{row(pr, "x", "queued", float64(42)), row(local, "x", "queued", float64(42))}, rec(local, "x", 42), true, 1},
+		{"origin ignored when useOrigin is false",
+			[]any{row(pr, "x", "queued", float64(42))}, rec(local, "x", 42), false, 0},
+		{"same title of two origins, both open: ambiguous",
+			[]any{row(pr, "x", "queued", float64(42)), row(local, "x", "queued", float64(42))}, rec(local, "x", 42), false, -1},
+		{"same title of two origins: the open row wins at step 3",
+			[]any{row(pr, "x", "fixed", float64(42)), row(local, "x", "queued", float64(42))}, rec(local, "x", 42), false, 1},
+		{"two identical exact keys fall through and stay ambiguous",
+			[]any{row(local, "x", "queued", float64(42)), row(local, "x", "queued", float64(42))}, rec(local, "x", 42), true, -1},
+		{"other title: the only fixing row", []any{row(local, "old", "fixing", float64(42))}, rec(local, "new", 42), true, 0},
+		{"other title: a final row is not taken", []any{row(local, "old", "failed", float64(42))}, rec(local, "new", 42), true, -1},
+		{"other title: two open rows",
+			[]any{row(local, "one", "queued", float64(42)), row(local, "two", "fixing", float64(42))}, rec(local, "new", 42), true, -1},
+		{"other title: one open row and one final row",
+			[]any{row(local, "one", "failed", float64(42)), row(local, "two", "queued", float64(42))}, rec(local, "new", 42), true, 1},
+		{"other line", []any{row(local, "x", "queued", float64(43))}, rec(local, "x", 42), true, -1},
+		{"other file", []any{map[string]any{"origin": local, "file": "b.go", "line": float64(42), "title": "x", "status": "queued"}}, rec(local, "x", 42), true, -1},
+		{"entries that are not objects are skipped",
+			[]any{"text", 7, nil, row(local, "x", "queued", float64(42))}, rec(local, "x", 42), true, 3},
+		{"no line on both", []any{row(local, "x", "queued", nil)}, rec(local, "x", nil), true, 0},
+		{"record with a line, row without", []any{row(local, "x", "queued", nil)}, rec(local, "x", 42), true, -1},
+		{"record without a line, row with a line", []any{row(local, "x", "queued", float64(42))}, rec(local, "x", nil), true, -1},
+		{"row without a status string is not open",
+			[]any{map[string]any{"origin": local, "file": "a.go", "line": float64(42), "title": "old"}}, rec(local, "new", 42), true, -1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := healingMatchFix(tc.list, tc.rec, tc.useOrigin); got != tc.want {
+				t.Errorf("healingMatchFix = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestHealingFixTransition pins every row of the transition table: the same
+// status, a final status against queued or fixing, failed against deferred,
+// and the changes that replace the stored status.
+func TestHealingFixTransition(t *testing.T) {
+	cases := []struct {
+		stored, incoming string
+		keep             bool
+		narration        string
+	}{
+		{"queued", "queued", true, healingNarrDuplicate},
+		{"fixed", "fixed", true, healingNarrDuplicate},
+		{"fixed", "queued", true, healingNarrKept + "fixed"},
+		{"failed", "fixing", true, healingNarrKept + "failed"},
+		{"deferred", "queued", true, healingNarrKept + "deferred"},
+		{"failed", "deferred", true, healingNarrKept + "failed"},
+		{"queued", "fixing", false, ""},
+		{"queued", "fixed", false, ""},
+		{"fixing", "deferred", false, ""},
+		{"failed", "fixed", false, ""},
+		{"deferred", "fixed", false, ""},
+		{"deferred", "failed", false, ""},
+		{"fixed", "failed", false, ""},
+		{"", "fixed", false, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.stored+" to "+tc.incoming, func(t *testing.T) {
+			keep, narration := healingFixTransition(tc.stored, tc.incoming)
+			if keep != tc.keep || narration != tc.narration {
+				t.Errorf("healingFixTransition(%q, %q) = %v, %q — want %v, %q", tc.stored, tc.incoming, keep, narration, tc.keep, tc.narration)
+			}
+		})
+	}
+}
+
+// TestHealingSetFixStatus walks the arms of healingSetFixStatus: no fixProgress,
+// a damaged one (the Suggestion names the kind of the call), no matching row,
+// a status change, a kept status and the deferredId on a changed and on a
+// kept row.
+func TestHealingSetFixStatus(t *testing.T) {
+	const stamp = "2026-10-13T10:07:00Z"
+	rec := map[string]any{"origin": "local-review", "file": "a.go", "line": 42, "title": "unchecked error"}
+	fixedUpd := healingFixUpdate{Rec: rec, UseOrigin: true, Kind: "fixed", Status: "fixed", Timestamp: stamp}
+	deferUpd := healingFixUpdate{Rec: rec, Kind: "defer", Status: "deferred", Timestamp: stamp, DeferredID: "d-1"}
+
+	t.Run("fixProgress absent", func(t *testing.T) {
+		healing := map[string]any{}
+		got, err := healingSetFixStatus(healing, fixedUpd, "state.json")
+		if got != (healingFixRowChange{}) || err != nil {
+			t.Errorf("got %+v, %v — want a zero result, nil", got, err)
+		}
+		if _, has := healing["fixProgress"]; has {
+			t.Errorf("healing = %v, want no fixProgress key", healing)
+		}
+	})
+
+	for _, upd := range []healingFixUpdate{fixedUpd, deferUpd} {
+		t.Run("fixProgress not a list, kind "+upd.Kind, func(t *testing.T) {
+			healing := map[string]any{"fixProgress": "oops"}
+			got, err := healingSetFixStatus(healing, upd, "state.json")
+			var de *mcpserver.DataError
+			if got.Changed || !errors.As(err, &de) {
+				t.Fatalf("got %+v, %v — want no change and a DataError", got, err)
+			}
+			if !strings.Contains(de.Suggestion, "Continue without more "+upd.Kind+" calls") ||
+				!strings.HasSuffix(de.Suggestion, "state.json: set data.healing.fixProgress to [] or remove the key.") {
+				t.Errorf("suggestion = %q, want the %s kind and the repair", de.Suggestion, upd.Kind)
+			}
+		})
+	}
+
+	t.Run("no matching row", func(t *testing.T) {
+		rows := []any{fixRowSeed("queued", map[string]any{"file": "b.go"})}
+		healing := map[string]any{"fixProgress": rows}
+		got, err := healingSetFixStatus(healing, deferUpd, "state.json")
+		if got != (healingFixRowChange{}) || err != nil {
+			t.Errorf("got %+v, %v — want a zero result, nil", got, err)
+		}
+		if row, _ := rows[0].(map[string]any); row["status"] != "queued" || row["deferredId"] != nil {
+			t.Errorf("row = %v, want it unchanged", row)
+		}
+	})
+
+	t.Run("status change keeps the other fields", func(t *testing.T) {
+		row := fixRowSeed("queued", nil)
+		healing := map[string]any{"fixProgress": []any{row}}
+		got, err := healingSetFixStatus(healing, fixedUpd, "state.json")
+		want := healingFixRowChange{Matched: true, Prior: "queued", Changed: true}
+		if got != want || err != nil {
+			t.Fatalf("got %+v, %v — want %+v, nil", got, err, want)
+		}
+		if wantRow := fixRowSeed("fixed", map[string]any{"updatedAt": stamp}); !reflect.DeepEqual(row, wantRow) {
+			t.Errorf("row = %#v, want %#v", row, wantRow)
+		}
+	})
+
+	t.Run("kept status", func(t *testing.T) {
+		row := fixRowSeed("fixed", nil)
+		healing := map[string]any{"fixProgress": []any{row}}
+		got, err := healingSetFixStatus(healing, fixedUpd, "state.json")
+		want := healingFixRowChange{Matched: true, Prior: "fixed", Kept: true}
+		if got != want || err != nil {
+			t.Errorf("got %+v, %v — want %+v, nil", got, err, want)
+		}
+		if !reflect.DeepEqual(row, fixRowSeed("fixed", nil)) {
+			t.Errorf("row = %#v, want it unchanged", row)
+		}
+	})
+
+	t.Run("deferredId on a changed row", func(t *testing.T) {
+		row := fixRowSeed("queued", nil)
+		healing := map[string]any{"fixProgress": []any{row}}
+		got, err := healingSetFixStatus(healing, deferUpd, "state.json")
+		want := healingFixRowChange{Matched: true, Prior: "queued", Changed: true}
+		if got != want || err != nil {
+			t.Fatalf("got %+v, %v — want %+v, nil", got, err, want)
+		}
+		if row["status"] != "deferred" || row["updatedAt"] != stamp || row["deferredId"] != "d-1" {
+			t.Errorf("row = %v, want status deferred, updatedAt %s and deferredId d-1", row, stamp)
+		}
+	})
+
+	t.Run("deferredId on a kept row", func(t *testing.T) {
+		row := fixRowSeed("failed", nil)
+		healing := map[string]any{"fixProgress": []any{row}}
+		got, err := healingSetFixStatus(healing, deferUpd, "state.json")
+		want := healingFixRowChange{Matched: true, Prior: "failed", Kept: true, Changed: true}
+		if got != want || err != nil {
+			t.Fatalf("got %+v, %v — want %+v, nil", got, err, want)
+		}
+		if row["status"] != "failed" || row["updatedAt"] != "2026-10-10T10:00:00Z" || row["deferredId"] != "d-1" {
+			t.Errorf("row = %v, want status failed, the old updatedAt and deferredId d-1", row)
+		}
+		got, err = healingSetFixStatus(healing, deferUpd, "state.json")
+		if got.Changed || err != nil {
+			t.Errorf("repeat got %+v, %v — want no change, nil", got, err)
+		}
+	})
 }
 
 // TestShipStateHealingRecord_HardenedTransitions walks every row of the
@@ -8232,16 +8918,17 @@ func TestShipStateHealingRecord_FixedDuplicateStillSetsFlag(t *testing.T) {
 	}
 }
 
-// TestShipStateHealingRecord_FixedWithoutDeferredIDKeepsNext pins that a
-// fixed record with no deferredId (absent, null, empty or blank) keeps next
-// nil and echoes no deferred field.
-func TestShipStateHealingRecord_FixedWithoutDeferredIDKeepsNext(t *testing.T) {
+// TestShipStateHealingRecord_FixedWithoutDeferredIDNext pins that a fixed
+// record with no deferredId (absent, null, empty or blank) returns the fixed
+// next and echoes no deferred field.
+func TestShipStateHealingRecord_FixedWithoutDeferredIDNext(t *testing.T) {
 	branch := "feat/heal-deferred-none"
 	dir, path, _ := deferredFixedFixture(t, branch)
 	for _, v := range []any{nil, "", "  "} {
 		out := healingFixedOut(t, dir, branch, v, map[string]any{"title": fmt.Sprintf("t %q", v)})
-		if out.Next != nil || out.DeferredID != "" || out.FixedInRun {
-			t.Errorf("deferredId %#v: next=%+v deferredId=%q fixedInRun=%v, want nil/empty/false", v, out.Next, out.DeferredID, out.FixedInRun)
+		wantFixNext(t, out, "Fix recorded. Continue the fix pass.")
+		if out.DeferredID != "" || out.FixedInRun {
+			t.Errorf("deferredId %#v: deferredId=%q fixedInRun=%v, want empty/false", v, out.DeferredID, out.FixedInRun)
 		}
 		if _, has := out.Record["deferredId"]; has {
 			t.Errorf("deferredId %#v: record = %v, want no deferredId", v, out.Record)
@@ -8710,4 +9397,376 @@ func TestHealingDeferredStoreError(t *testing.T) {
 			}
 		})
 	}
+}
+
+// deferFixRowCall runs one defer call on branch at the time at for the
+// finding of fixRowSeed (a.go:42, "unchecked error"), with the detail
+// overrides applied, and returns the narration.
+func deferFixRowCall(t *testing.T, dir, branch string, at time.Time, overrides map[string]any) ShipStepNarrationOut {
+	t.Helper()
+	detail := map[string]any{
+		"branch": branch, "severity": "high", "file": "a.go", "line": float64(42), "title": "unchecked error",
+	}
+	maps.Copy(detail, overrides)
+	out, err := shipState(dir, dir, ShipStateIn{Action: "defer", Detail: detail}, fixedNow(at))
+	if err != nil {
+		t.Fatalf("defer: %v", err)
+	}
+	n, ok := out.(ShipStepNarrationOut)
+	if !ok {
+		t.Fatalf("defer output = %T, want ShipStepNarrationOut", out)
+	}
+	return n
+}
+
+// wantDeferNote checks that the summary and next.instruction of a defer
+// response both end with note, and that next keeps its id.
+func wantDeferNote(t *testing.T, n ShipStepNarrationOut, note string) {
+	t.Helper()
+	if !strings.HasSuffix(n.Summary, " "+note) {
+		t.Errorf("summary = %q, want suffix %q", n.Summary, " "+note)
+	}
+	if n.Next == nil || n.Next.ID != deferredNextID || !strings.HasSuffix(n.Next.Instruction, " "+note) {
+		t.Errorf("next = %+v, want id %s and an instruction with suffix %q", n.Next, deferredNextID, " "+note)
+	}
+}
+
+// seedHealingValue sets data.healing in the state file to v, which may be a
+// damaged (not an object) value.
+func seedHealingValue(t *testing.T, path string, v any) {
+	t.Helper()
+	data := readStateData(t, path)
+	data["healing"] = v
+	raw, err := json.Marshal(data)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+// deferFixRows reads data.healing.fixProgress back from the state file.
+func deferFixRows(t *testing.T, path string) []any {
+	t.Helper()
+	rows, _ := healingData(t, path)["fixProgress"].([]any)
+	return rows
+}
+
+// TestShipState_Defer_SetsFixRow pins the row update of a defer call for a
+// queued and a fixing row: the row becomes deferred, updatedAt is the call
+// time, firstAt and the other fields stay, and deferredId is the id of the
+// deferred.json row. The summary and next end with the note that echoes the
+// write and the prior status. The state on disk validates against the schema.
+func TestShipState_Defer_SetsFixRow(t *testing.T) {
+	const stamp = "2026-10-13T10:05:00Z"
+	const wantID = "review-deferred-" + stamp + "-1"
+	at := time.Date(2026, 10, 13, 10, 5, 0, 0, time.UTC)
+	for _, status := range []string{"queued", "fixing"} {
+		t.Run(status, func(t *testing.T) {
+			branch := "feat/defer-row-set"
+			dir, path := deferFixture(t, branch)
+			useMemHistory(t)
+			seedFixProgress(t, path, []any{fixRowSeed(status, nil)})
+
+			n := deferFixRowCall(t, dir, branch, at, nil)
+			wantDeferNote(t, n, "Fix-progress row set to deferred (was "+status+").")
+
+			want := []any{fixRowSeed("deferred", map[string]any{"updatedAt": stamp, "deferredId": wantID})}
+			if rows := deferFixRows(t, path); !reflect.DeepEqual(rows, want) {
+				t.Errorf("fixProgress = %#v, want %#v", rows, want)
+			}
+			if got := deferredStateEntry(t, path, 0)["deferredId"]; got != wantID {
+				t.Errorf("deferredFindings[0].deferredId = %v, want %s", got, wantID)
+			}
+			if err := shipStateSchemaValidator(t)(readStateData(t, path)); err != nil {
+				t.Errorf("schema rejected the state written by defer: %v", err)
+			}
+		})
+	}
+}
+
+// TestShipState_Defer_TitleFallback pins that a defer call with another title
+// than the stored row matches the only open row on the same file and line.
+// The row keeps its title.
+func TestShipState_Defer_TitleFallback(t *testing.T) {
+	const stamp = "2026-10-13T10:05:00Z"
+	branch := "feat/defer-row-title"
+	dir, path := deferFixture(t, branch)
+	useMemHistory(t)
+	seedFixProgress(t, path, []any{fixRowSeed("queued", map[string]any{"title": "reworded title"})})
+
+	n := deferFixRowCall(t, dir, branch, time.Date(2026, 10, 13, 10, 5, 0, 0, time.UTC), nil)
+	wantDeferNote(t, n, "Fix-progress row set to deferred (was queued).")
+
+	want := []any{fixRowSeed("deferred", map[string]any{
+		"title": "reworded title", "updatedAt": stamp, "deferredId": "review-deferred-" + stamp + "-1",
+	})}
+	if rows := deferFixRows(t, path); !reflect.DeepEqual(rows, want) {
+		t.Errorf("fixProgress = %#v, want %#v", rows, want)
+	}
+}
+
+// TestShipState_Defer_KeepsFailed pins the three kept outcomes: a failed row
+// stays failed with its updatedAt and gets the deferredId; a deferred row that
+// a second defer call reaches gets the new deferredId; a failed row stays
+// as it is, with no note, when the deferred.json write failed and the entry
+// has no deferredId.
+func TestShipState_Defer_KeepsFailed(t *testing.T) {
+	const old = "2026-10-10T10:00:00Z"
+	at := time.Date(2026, 10, 13, 10, 5, 0, 0, time.UTC)
+
+	t.Run("failed row gets the id", func(t *testing.T) {
+		branch := "feat/defer-row-failed"
+		dir, path := deferFixture(t, branch)
+		useMemHistory(t)
+		seedFixProgress(t, path, []any{fixRowSeed("failed", nil)})
+
+		n := deferFixRowCall(t, dir, branch, at, nil)
+		wantDeferNote(t, n, "Fix-progress row kept failed and got the deferred id.")
+		want := []any{fixRowSeed("failed", map[string]any{
+			"updatedAt": old, "deferredId": "review-deferred-2026-10-13T10:05:00Z-1",
+		})}
+		if rows := deferFixRows(t, path); !reflect.DeepEqual(rows, want) {
+			t.Errorf("fixProgress = %#v, want %#v", rows, want)
+		}
+	})
+
+	t.Run("second defer on a deferred row", func(t *testing.T) {
+		branch := "feat/defer-row-twice"
+		dir, path := deferFixture(t, branch)
+		useMemHistory(t)
+		seedFixProgress(t, path, []any{fixRowSeed("queued", nil)})
+
+		deferFixRowCall(t, dir, branch, at, nil)
+		later := at.Add(time.Minute)
+		n := deferFixRowCall(t, dir, branch, later, nil)
+		wantDeferNote(t, n, "Fix-progress row kept deferred and got the deferred id.")
+		want := []any{fixRowSeed("deferred", map[string]any{
+			"updatedAt": "2026-10-13T10:05:00Z", "deferredId": "review-deferred-2026-10-13T10:06:00Z-2",
+		})}
+		if rows := deferFixRows(t, path); !reflect.DeepEqual(rows, want) {
+			t.Errorf("fixProgress = %#v, want %#v", rows, want)
+		}
+	})
+
+	t.Run("failed row, deferred.json write failed", func(t *testing.T) {
+		branch := "feat/defer-row-failed-nostore"
+		dir, path := deferFixture(t, branch)
+		useFailingHistory(t)
+		seedFixProgress(t, path, []any{fixRowSeed("failed", nil)})
+
+		n := deferFixRowCall(t, dir, branch, at, nil)
+		if strings.Contains(n.Summary, "Fix-progress row") || strings.Contains(n.Next.Instruction, "Fix-progress row") {
+			t.Errorf("summary = %q, next = %q, want no row note when the row does not change", n.Summary, n.Next.Instruction)
+		}
+		want := []any{fixRowSeed("failed", nil)}
+		if rows := deferFixRows(t, path); !reflect.DeepEqual(rows, want) {
+			t.Errorf("fixProgress = %#v, want %#v", rows, want)
+		}
+	})
+}
+
+// TestShipState_Defer_FixedRowToDeferred pins the rule that a finding that
+// was fixed earlier moves to deferred when it is deferred.
+func TestShipState_Defer_FixedRowToDeferred(t *testing.T) {
+	const stamp = "2026-10-13T10:05:00Z"
+	branch := "feat/defer-row-fixed"
+	dir, path := deferFixture(t, branch)
+	useMemHistory(t)
+	seedFixProgress(t, path, []any{fixRowSeed("fixed", nil)})
+
+	n := deferFixRowCall(t, dir, branch, time.Date(2026, 10, 13, 10, 5, 0, 0, time.UTC), nil)
+	wantDeferNote(t, n, "Fix-progress row set to deferred (was fixed).")
+	want := []any{fixRowSeed("deferred", map[string]any{"updatedAt": stamp, "deferredId": "review-deferred-" + stamp + "-1"})}
+	if rows := deferFixRows(t, path); !reflect.DeepEqual(rows, want) {
+		t.Errorf("fixProgress = %#v, want %#v", rows, want)
+	}
+}
+
+// TestShipState_Defer_DamagedHealing pins that a damaged data.healing does not
+// fail the defer call: the finding is recorded, the summary and next end with
+// the warning and the repair step, and the healing value stays as it was.
+func TestShipState_Defer_DamagedHealing(t *testing.T) {
+	repair := func(path string) string {
+		return " — the ship state is damaged. Tell the user to repair the ship state file " + path + " (set the damaged key to {} or [], or remove it)."
+	}
+	notObject := func(path string) string {
+		return "Fix-progress row not updated: data.healing in " + path + " is not an object" + repair(path)
+	}
+	notList := func(path string) string {
+		return "Fix-progress row not updated: data.healing.fixProgress in " + path + " is not a list" + repair(path)
+	}
+	cases := []struct {
+		name    string
+		healing any
+		warning func(path string) string
+	}{
+		{"healing is a string", "oops", notObject},
+		{"healing is a list", []any{}, notObject},
+		{"fixProgress is a string", map[string]any{"fixProgress": "oops"}, notList},
+		{"fixProgress is null", map[string]any{"fixProgress": nil}, notList},
+		{"fixProgress is an object", map[string]any{"fixProgress": map[string]any{}}, notList},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			branch := "feat/defer-row-damaged"
+			dir, path := deferFixture(t, branch)
+			useMemHistory(t)
+			seedHealingValue(t, path, tc.healing)
+
+			n := deferFixRowCall(t, dir, branch, time.Date(2026, 10, 13, 10, 5, 0, 0, time.UTC), nil)
+			wantDeferNote(t, n, tc.warning(path))
+			if got := readStateData(t, path)["healing"]; !reflect.DeepEqual(got, tc.healing) {
+				t.Errorf("data.healing = %#v, want it unchanged: %#v", got, tc.healing)
+			}
+			if findings, _ := readStateData(t, path)["deferredFindings"].([]any); len(findings) != 1 {
+				t.Errorf("deferredFindings = %v, want 1 entry", findings)
+			}
+		})
+	}
+}
+
+// TestShipState_Defer_NoRow pins that a defer call with no healing key, no
+// fixProgress key, an empty list, a row of another file or an ambiguous match
+// changes no row and returns the same summary and next as a defer call
+// without healing data.
+func TestShipState_Defer_NoRow(t *testing.T) {
+	const stamp = "2026-10-13T10:05:00Z"
+	const id = "review-deferred-" + stamp + "-1"
+	cases := []struct {
+		name string
+		seed func(t *testing.T, path string)
+		rows []any // fixProgress after the call; nil when the key is absent
+	}{
+		{"no healing key", func(*testing.T, string) {}, nil},
+		{"healing is null", func(t *testing.T, path string) { seedHealingValue(t, path, nil) }, nil},
+		{"no fixProgress key", func(t *testing.T, path string) { seedHealing(t, path, map[string]any{}) }, nil},
+		{"empty fixProgress", func(t *testing.T, path string) { seedFixProgress(t, path, []any{}) }, []any{}},
+		{"row of another file", func(t *testing.T, path string) {
+			seedFixProgress(t, path, []any{fixRowSeed("queued", map[string]any{"file": "b.go"})})
+		}, []any{fixRowSeed("queued", map[string]any{"file": "b.go"})}},
+		{"two open rows on the line", func(t *testing.T, path string) {
+			seedFixProgress(t, path, []any{
+				fixRowSeed("queued", map[string]any{"title": "other one"}),
+				fixRowSeed("fixing", map[string]any{"title": "other two"}),
+			})
+		}, []any{
+			fixRowSeed("queued", map[string]any{"title": "other one"}),
+			fixRowSeed("fixing", map[string]any{"title": "other two"}),
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			branch := "feat/defer-row-none"
+			dir, path := deferFixture(t, branch)
+			useMemHistory(t)
+			tc.seed(t, path)
+			beforeHealing, beforePresent := readStateData(t, path)["healing"]
+
+			n := deferFixRowCall(t, dir, branch, time.Date(2026, 10, 13, 10, 5, 0, 0, time.UTC), nil)
+			afterHealing, afterPresent := readStateData(t, path)["healing"]
+			if beforePresent != afterPresent || !reflect.DeepEqual(beforeHealing, afterHealing) {
+				t.Errorf("data.healing = %#v (present %v), want %#v (present %v): the call must not create or change it",
+					afterHealing, afterPresent, beforeHealing, beforePresent)
+			}
+			wantSummary := "Deferred finding recorded: unchecked error (id " + id + "). Written to " +
+				history.NewFileWriter(historyDir(dir)).DeferredPath() + "."
+			if n.Summary != wantSummary {
+				t.Errorf("summary = %q, want %q", n.Summary, wantSummary)
+			}
+			if want := deferredNext(id, false, false); n.Next == nil || n.Next.Instruction != want {
+				t.Errorf("next = %+v, want instruction %q", n.Next, want)
+			}
+			if rows := deferFixRows(t, path); !reflect.DeepEqual(rows, tc.rows) {
+				t.Errorf("fixProgress = %#v, want %#v", rows, tc.rows)
+			}
+		})
+	}
+}
+
+// TestShipStateHealingRecord_FixProgressKeepsDeferredID pins that a
+// fix-progress status change that replaces a row keeps the deferredId that
+// defer copied onto the row: a fix-progress record never carries one.
+func TestShipStateHealingRecord_FixProgressKeepsDeferredID(t *testing.T) {
+	const stamp = "2026-10-13T10:07:00Z"
+	for _, status := range []string{"fixed", "failed"} {
+		t.Run("deferred to "+status, func(t *testing.T) {
+			branch := "feat/heal-progress-keeps-id"
+			dir, path := deferFixture(t, branch)
+			seedFixProgress(t, path, []any{fixRowSeed("deferred", map[string]any{"deferredId": "d-1"})})
+
+			out := fixProgressCall(t, dir, branch, time.Date(2026, 10, 13, 10, 7, 0, 0, time.UTC), map[string]any{"status": status})
+			if !out.Written || out.Record["deferredId"] != "d-1" {
+				t.Errorf("written=%v record=%v, want a write that echoes deferredId d-1", out.Written, out.Record)
+			}
+			want := []any{fixRowSeed(status, map[string]any{"updatedAt": stamp, "deferredId": "d-1"})}
+			if rows := deferFixRows(t, path); !reflect.DeepEqual(rows, want) {
+				t.Errorf("fixProgress = %#v, want %#v", rows, want)
+			}
+		})
+	}
+}
+
+// TestShipState_Defer_PersistFailureKeepsRow pins that a failed deferred.json
+// write leaves the fix row as it is, with no row note: the caller's
+// deferred_add fallback and its own fix-progress call decide the row. The
+// summary still carries the deferred.json write failure.
+func TestShipState_Defer_PersistFailureKeepsRow(t *testing.T) {
+	branch := "feat/defer-row-persist-fail"
+	dir, path := deferFixture(t, branch)
+	useFailingHistory(t)
+	seedFixProgress(t, path, []any{fixRowSeed("queued", nil)})
+
+	n := deferFixRowCall(t, dir, branch, time.Date(2026, 10, 13, 10, 5, 0, 0, time.UTC), nil)
+	if strings.Contains(n.Summary, "Fix-progress row") || strings.Contains(n.Next.Instruction, "Fix-progress row") {
+		t.Errorf("summary = %q, next = %q, want no row note", n.Summary, n.Next.Instruction)
+	}
+	if !strings.Contains(n.Summary, "no space left on device") {
+		t.Errorf("summary = %q, want it to keep the deferred.json write failure", n.Summary)
+	}
+	want := []any{fixRowSeed("queued", nil)}
+	if rows := deferFixRows(t, path); !reflect.DeepEqual(rows, want) {
+		t.Errorf("fixProgress = %#v, want it unchanged: %#v", rows, want)
+	}
+}
+
+// TestShipState_Defer_NoLineRow pins at the defer boundary that a defer call
+// with no detail.line matches a fix row with no line on the same file and
+// title, and does not match a row with a line.
+func TestShipState_Defer_NoLineRow(t *testing.T) {
+	const stamp = "2026-10-13T10:05:00Z"
+	at := time.Date(2026, 10, 13, 10, 5, 0, 0, time.UTC)
+	noLine := map[string]any{"line": nil}
+
+	t.Run("row with no line", func(t *testing.T) {
+		branch := "feat/defer-row-no-line"
+		dir, path := deferFixture(t, branch)
+		useMemHistory(t)
+		seedFixProgress(t, path, []any{fixRowSeed("queued", noLine)})
+
+		n := deferFixRowCall(t, dir, branch, at, noLine)
+		wantDeferNote(t, n, "Fix-progress row set to deferred (was queued).")
+		want := []any{fixRowSeed("deferred", map[string]any{
+			"line": nil, "updatedAt": stamp, "deferredId": "review-deferred-" + stamp + "-1",
+		})}
+		if rows := deferFixRows(t, path); !reflect.DeepEqual(rows, want) {
+			t.Errorf("fixProgress = %#v, want %#v", rows, want)
+		}
+	})
+
+	t.Run("row with a line", func(t *testing.T) {
+		branch := "feat/defer-row-no-line-other"
+		dir, path := deferFixture(t, branch)
+		useMemHistory(t)
+		seedFixProgress(t, path, []any{fixRowSeed("queued", nil)})
+
+		n := deferFixRowCall(t, dir, branch, at, noLine)
+		if strings.Contains(n.Summary, "Fix-progress row") {
+			t.Errorf("summary = %q, want no row note", n.Summary)
+		}
+		if rows := deferFixRows(t, path); !reflect.DeepEqual(rows, []any{fixRowSeed("queued", nil)}) {
+			t.Errorf("fixProgress = %#v, want it unchanged", rows)
+		}
+	})
 }
