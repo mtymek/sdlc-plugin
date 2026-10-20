@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.4.7] - 2026-10-20
+
+### RC 1
+
+- Setup and harden protect guardrails and mirrors from unsafe writes.
+- Setup refuses a whole-table guardrail write that removes guardrails, and writes guardrails one id at a time in both setup modes.
+- Mirrors carry a marker line; the render tool refuses to replace a mirror with hand-written content; harden skips a mirror that the render tool refuses.
+- A post-edit hook validates dimension files, config.toml, and mirrors.
+- Guardrail checks cover guard shape and target choice.
+- Docs: setup text no longer names a whole-table guardrail write; mirror and guardrail specs are synced and the OpenSpec change is archived.
+- New contributor command `tmp` keeps temporary output of a request in the project-local temporary directory.
+
 ## [0.4.6] - 2026-10-20
 
 ### RC 1
