@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.6] - 2026-10-20
+
+### RC 1
+
+- Ship keeps the state of earlier runs when a new run starts on the same branch.
+- The dashboard shows fixed review findings as fixed.
+
 ## [0.4.5] - 2026-10-13
 
 ### RC 1
