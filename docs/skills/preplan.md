@@ -67,7 +67,8 @@ The topic file is in the main worktree, so every worktree of the repo sees
 the same file.
 
 The skill asks the `plan_support` tool to create the file once, with these
-sections in this order:
+sections in this order. The tool leaves out `Open questions`. The skill adds
+that section when a question is open:
 
 | Section | Content |
 |---|---|
@@ -75,8 +76,11 @@ sections in this order:
 | `Users and effect` | Who uses the change, what changes for them, and what fails today. |
 | `Flows` | A before and after diagram for each flow that a proposal changes, with the same steps as a numbered list. If no flow changes, the line `No flow change.` |
 | `Decisions` | A table with one row for each proposal. The number of a row never changes, and the skill never uses it again. |
-| `Open questions` | One bullet for each question that has no answer yet. |
-| `Guardrail check` | A table with one result row for each proposal. |
+| `Open questions` | One bullet for each question that has no answer yet. The section exists only when at least one question is open. |
+
+After the first check, one `**Guardrail check:**` line under the Started line
+shows the number of guardrails, the proposal counts and the UTC time of the
+last check.
 
 The file has a status line. It shows where the topic stands:
 
@@ -84,7 +88,7 @@ The file has a status line. It shows where the topic stands:
 |---|---|
 | `in progress` | The dialogue is running. This is the status of a new file. |
 | `ready for plan` | You finished the dialogue. The file can go to `/plan`. |
-| `paused` | You cancelled. The skill keeps the file. |
+| `paused` | You cancelled, or the guardrail check stopped with an error (see [Guardrail check](#guardrail-check)). The skill keeps the file. |
 
 The skill sets a status only at these events. You can also set any of the
 three statuses on the Preplans tab of the dashboard, with no dialogue event
@@ -95,7 +99,9 @@ own.
 
 The skill never overwrites an existing file. Run `/preplan` again with the
 same topic to continue from the file. The status becomes `in progress`, and
-the skill shows you the open questions.
+the skill shows you the open questions, if any. An older file loses its
+`Guardrail check` table and an empty `Open questions` section. The skill keeps
+each kept or dropped result as a note in the `Decisions` table.
 
 ### How the dialogue works
 
@@ -114,15 +120,34 @@ accepted. Set the guardrails with `/setup --guardrails`. Each guardrail has a
 severity: `error`, or `warning`. A guardrail with no severity counts as
 `error`.
 
-Each proposal gets one row in the `Guardrail check` table. The `Result`
-column shows what happened:
+Each check looks at every proposal again, except a dropped or moved one. After the check, one line under the
+Started line records it:
 
-| Result | Meaning |
+    **Guardrail check:** 53 guardrails, 7 proposals: 6 pass, 1 kept, 0 dropped. Last check: 2026-10-21T17:05:00Z.
+
+If the skill could not read the guardrails, the line ends with
+`Guardrails unavailable: <reason>.` A proposal with a kept note counts as kept. A dropped proposal counts as dropped. A moved proposal counts nowhere. Each other proposal counts as a pass.
+
+The check can stop the dialogue with an error. The skill prints the error,
+then goes to the cancel step, which sets the status to `paused`. The check
+stops in these cases:
+
+- The topic file is a link, a folder, or another file that is not a regular
+  file. A link to a regular file passes the first step of the skill, so the
+  stop comes only at the first check. Replace the link with a copy of the
+  file that it points to, then run the skill again.
+- The topic file is larger than 8 MiB.
+- The first 4096 bytes of the topic file hold no `**Started:**` line and no
+  `**Status:**` line.
+- A read or a write of the topic file fails.
+
+Two results also leave a short note at the end of the `Reason` cell in the
+`Decisions` table:
+
+| Note | Meaning |
 |---|---|
-| `pass — <basis>` | The proposal breaks no guardrail. The `Guardrail` column lists each guardrail that the skill checked. `<basis>` gives, for each guardrail, the fact of the proposal that clears it. When no guardrail is configured, the result is `pass — no guardrail configured`. |
-| `kept — <ids>` | The proposal breaks only `warning` guardrails, and you chose to keep it. |
-| `dropped — <ids>` | The proposal breaks an `error` guardrail, and it still did after one rework. |
-| `unavailable — <warning>` | The skill could not read the guardrails. The proposal counts as a pass. |
+| `Kept with warning: <ids>.` | The proposal breaks only `warning` guardrails, and you chose to keep it. A later check does not ask again while the note lists every `warning` guardrail that the proposal breaks. If you change the proposal, or it breaks a new `warning` guardrail, the skill asks again. |
+| `Dropped by: <ids>.` | The proposal breaks an `error` guardrail, and it still did after one rework. |
 
 What the skill does when a proposal breaks a guardrail:
 
@@ -131,8 +156,8 @@ What the skill does when a proposal breaks a guardrail:
   row stays in the `Decisions` table, marked `Dropped:`, so you can see why.
 - **A `warning` guardrail only:** the skill shows you each guardrail and its
   rule, then asks once: keep the proposal, rework it, or cancel. If you rework
-  it, the proposal moves to `Open questions` and has no check row until you
-  answer. Its row stays in the `Decisions` table, marked `Moved:`. When the
+  it, the proposal moves to `Open questions` until you answer. Its row stays
+  in the `Decisions` table, marked `Moved:`. When the
   proposal comes back, it gets a new row with a new number.
 
 If you change a proposal later, the skill checks it again.
@@ -177,8 +202,9 @@ file is created.
 
 The file `2026-10-12-auth-flow.md` already exists. It was created on an
 earlier day: the date in the name is the day of the first run. A run on
-2026-10-13 continues this file. The skill keeps it as it is and lists its
-open questions. Then the dialogue goes on from there.
+2026-10-13 continues this file. The skill keeps it, converts an older file to
+the new form, and lists its open questions, if any. Then the dialogue goes on
+from there.
 
 **Plan from a topic file without the handoff:**
 
