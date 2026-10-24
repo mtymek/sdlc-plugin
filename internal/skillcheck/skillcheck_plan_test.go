@@ -416,6 +416,43 @@ func TestPlanSkillsParamsMatchSchema(t *testing.T) {
 	}
 }
 
+// TestPlanSkillActionsAreRegistered checks that every name({ ... }) tool call
+// in skills/plan/SKILL.md names a registered MCP tool and, when it sets an
+// action, an action in that tool's registered enum. Step 3 calls validate
+// with the plan_gates action, so the test also requires that call: a
+// misspelled or dropped action name then fails here, not in a plan run. It
+// reads SKILL.md only: plan-format-reference.md holds example code such as
+// signToken(...) that is not an MCP call, so flagParityAssertToolsResolve
+// (which reads every skills/plan/*.md file) does not fit this skill.
+func TestPlanSkillActionsAreRegistered(t *testing.T) {
+	reg := flagParityBuildRegistry(t)
+	rel := "skills/plan/SKILL.md"
+	data, err := os.ReadFile(filepath.Join(planSkillsRepoRoot(t), rel))
+	if err != nil {
+		t.Fatalf("read %s: %v", rel, err)
+	}
+
+	sawPlanGates := false
+	for _, c := range flagParityToolCalls(string(data)) {
+		if c.name == "validate" && c.action == "plan_gates" {
+			sawPlanGates = true
+		}
+		enum := reg.actions[c.name]
+		switch {
+		case !reg.tools[c.name]:
+			t.Errorf("%s:%d: references MCP tool %q, which is not registered by any Register*Tools function", rel, c.line, c.name)
+		case c.action == "":
+		case enum == nil:
+			t.Errorf("%s:%d: %s call sets action %q, but the registered %s tool has no action enum", rel, c.line, c.name, c.action, c.name)
+		case !enum[c.action]:
+			t.Errorf("%s:%d: %s call references action %q, which is not in the registered %s action enum", rel, c.line, c.name, c.action, c.name)
+		}
+	}
+	if !sawPlanGates {
+		t.Errorf("%s: no validate call with action %q found — the skill dropped it, or the call-detection regex no longer matches its call style", rel, "plan_gates")
+	}
+}
+
 // TestPlanSkillsNoOrchestratorReferences is the AC3 acceptance criterion:
 // neither SKILL.md may reference the retired plan-explore-orchestrator /
 // wave-runner agents by name in their own prose (Ruling Set 15 replaced
@@ -453,15 +490,14 @@ func TestPlanSkillsNoOrchestratorReferences(t *testing.T) {
 var planSkillsReferenceFileHashes = map[string]string{
 	"skills/plan/g17-dimension-coverage-prompt.md":    "5e5ce6093275c3b5e82c943fa3f6ed43c074cfababb3ebde287b8db3da599872",
 	"skills/plan/intake-verify-prompt.md":             "eeae004f3a04a9382988fbf160b9e15d038300c50abb9c60ff2d168b6906b724",
-	"skills/plan/lane-content-coverage-prompt.md":     "3cdb91f357683fd5519e6c5f937a2bbacc6d357639f19239d0e31ad472cb5ae8",
-	"skills/plan/lane-file-existence-prompt.md":       "b3b761ebd1c9a1b20c1228a317fb074d769dccaa0ef0ed6034ceb3eb77a56c9d",
+	"skills/plan/lane-content-coverage-prompt.md":     "4edd956548e0d3b10b9da4c449b012af2ef8d79f5f25f3c51e7f1444bd36514b",
 	"skills/plan/lane-guardrail-compliance-prompt.md": "40e29d72be6c960fd14f1ec0866a9166836cdce33b2a1298507fc2d97b8b2f15",
-	"skills/plan/lane-static-structural-prompt.md":    "abfb3e2b81f32214e91bdcddc0919ed438f9d6d0024503c0f03caed0d3a3e363",
+	"skills/plan/lane-static-structural-prompt.md":    "79ec35f1054923d4f272c165ce46f8de8a1642c8101fdec60722a126fd66399b",
 	"skills/plan/lane-style-compliance-prompt.md":     "8e176210995de9741a3ab519f939089b921564952fcfb4071193f80c06be20d4",
-	"skills/plan/lens-architecture-prompt.md":         "fe2315f0cc6b1a1f06224f37f2b8c0c7348364d67db0e0b490c6c9fd13e825a0",
-	"skills/plan/lens-requirements-prompt.md":         "82b555e796446c9236bc8abc99c9dd524edb8c79b55f6fe6d4333dfbae50560b",
-	"skills/plan/lens-risk-prompt.md":                 "eb14f4b2797e7cf09dbda52f08f20eee30cd25537ae13e87320b35ab4d3ef9a6",
-	"skills/plan/plan-reviewer-prompt.md":             "1d797e8c561f75e198cc73604dec65b4a3533c0b607ed325ce54522d78d4ae14",
+	"skills/plan/lens-architecture-prompt.md":         "8acff25a20493ae7cb2b32f16751f45edc91e2d13cd6cd5dc4545007875b2df7",
+	"skills/plan/lens-requirements-prompt.md":         "1cca1107f1bed8ad92753e305114225d71505750f114e4cdd4f0e12b2f083236",
+	"skills/plan/lens-risk-prompt.md":                 "6e9bfc5711d0d14e7bba2293040f0184bc88911ce3c2cb5050ae1590648020fc",
+	"skills/plan/plan-reviewer-prompt.md":             "9e9b0e938c57db33def969f19d818ac978fd397956fb7d5d5aaa39b8141ff3fe",
 	"skills/plan/plan-format-reference.md":            "a5a8c6aa54c71dadc13c84b96030029246a3d91b905f558968741fddd7aa75d0",
 	"skills/plan/plan-template-default.md":            "45af486fb7e93c36ba47ccd9a5ef832e96b294ff804b36144dad0d6f892a3e7a",
 	"skills/execute/spec-compliance-reviewer.md":      "b163b798f92a9247eda48763c08c8f4ec43872fae31201427f204ebb4c99af1e",

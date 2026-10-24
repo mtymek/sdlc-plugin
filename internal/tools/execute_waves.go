@@ -143,21 +143,19 @@ func waveComputeParseDependsOn(body string) []int {
 	return parseDependsOnRefs(dependsOn)
 }
 
-// waveComputeParseFiles extracts literal file paths from a task's
-// **Files:** block (Create:/Modify:/Test: bullet lines). Only the first
-// backtick-quoted path on each bullet line is taken: a Modify line's
-// trailing "— [what changes]" note can itself contain backticked tokens
-// that are not file paths, so a whole-block scan would over-capture.
+// waveComputeParseFiles extracts the file paths of a task's **Files:**
+// block. It reuses parseTaskFiles (plan_gates.go), so scheduling and the
+// plan_gates checks read the same paths. (snapshotPlan in plan_support.go
+// still parses the Files block on its own for the material-change compare.)
+// The paths are cleaned: "./a.go" and "a.go" are one path. A bullet with an
+// extension path yields the same path as before parseTaskFiles was shared; a
+// bullet with only a slash path (a folder such as `internal/dir/`) is now
+// included, where it was skipped before.
 func waveComputeParseFiles(body string) []string {
-	block, found := extractDelimitedBlock(body, psFilesBlockStartRe, []string{"\n**", "\n### ", "\n---", "\n## "})
-	if !found {
-		return nil
-	}
 	var files []string
-	for _, line := range psFileLineBulletRe.FindAllString(block, -1) {
-		if m := backtickPathRe.FindStringSubmatch(line); m != nil {
-			files = append(files, m[1])
-		}
+	taskFiles, _, _ := parseTaskFiles(body)
+	for _, f := range taskFiles {
+		files = append(files, f.Path)
 	}
 	return files
 }

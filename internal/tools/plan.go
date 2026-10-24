@@ -177,6 +177,28 @@ type Lane struct {
 	GateIDs            []string `json:"gateIds"`
 }
 
+// GateCheck is a Step 3 gate check that starts no sub-agent.
+type GateCheck struct {
+	Name    string   `json:"name" jsonschema_description:"Entry name in merge_results laneResults: go-gates or inline-checks."`
+	Kind    string   `json:"kind" jsonschema_description:"validate: call validate({action:\"plan_gates\"}); inline: the main session judges the gates."`
+	GateIDs []string `json:"gateIds" jsonschema_description:"Gates this entry covers in merge_results. Never empty. The go-gates entry can also report G18 floor findings (finding id G18, a Contract with no code block, table or diagram) although G18 is not in its gateIds: the content-coverage lane owns G18."`
+}
+
+// planInlineGateIDs are the gates the main session judges itself in Step 3.
+// planGatesGateIDs (plan_gates.go) holds the gates that validate plan_gates owns.
+var planInlineGateIDs = []string{"G5", "G6", "G13", "G15"}
+
+// buildGateChecks returns the Step 3 gate checks that start no sub-agent.
+// With buildLanes, the gateIds cover G1..G22, each gate once. The one
+// exception is the G18 floor: validate plan_gates (go-gates) also emits G18
+// findings, while G18 itself belongs to the content-coverage lane.
+func buildGateChecks() []GateCheck {
+	return []GateCheck{
+		{Name: "go-gates", Kind: "validate", GateIDs: planGatesGateIDs},
+		{Name: "inline-checks", Kind: "inline", GateIDs: planInlineGateIDs},
+	}
+}
+
 // LensReviewer mirrors plan.js's buildLensReviewers() entry shape.
 type LensReviewer struct {
 	Lens               string   `json:"lens"`
@@ -236,6 +258,7 @@ type PlanPrepareOut struct {
 	IntakeAuditDispatch Dispatch            `json:"intakeAuditDispatch"`
 	Lanes               []Lane              `json:"lanes"`
 	LensReviewers       []LensReviewer      `json:"lensReviewers"`
+	GateChecks          []GateCheck         `json:"gateChecks"`
 	ReviewLoop          ReviewLoop          `json:"reviewLoop"`
 	Template            *TemplateResolution `json:"template,omitempty"`
 	Errors              []string            `json:"errors"`
@@ -952,9 +975,9 @@ func buildIntakeAuditDispatch() Dispatch {
 	}
 }
 
-// buildLanes mirrors plan.js's buildLanes (lane partitioning: four
-// static lane definitions, a fifth entry mirroring g17Dispatch verbatim, and
-// a sixth style-compliance lane that owns G22).
+// buildLanes returns the Step 3 lanes: three static lane definitions, a
+// fourth entry that copies g17Dispatch verbatim, and a fifth style-compliance
+// lane that owns G22.
 func buildLanes(g17Dispatch Dispatch) []Lane {
 	type laneDef struct {
 		name         string
@@ -963,9 +986,8 @@ func buildLanes(g17Dispatch Dispatch) []Lane {
 		gateIDs      []string
 	}
 	defs := []laneDef{
-		{"static-structural", "haiku", "lane-static-structural-prompt.md", []string{"G1", "G2", "G3", "G7", "G12"}},
-		{"content-coverage", "sonnet", "lane-content-coverage-prompt.md", []string{"G5", "G6", "G8", "G9", "G11", "G13", "G15", "G16", "G18", "G19", "G20", "G21"}},
-		{"file-existence", "haiku", "lane-file-existence-prompt.md", []string{"G4", "G10"}},
+		{"static-structural", "haiku", "lane-static-structural-prompt.md", []string{"G1", "G2", "G7"}},
+		{"content-coverage", "sonnet", "lane-content-coverage-prompt.md", []string{"G11", "G16", "G18", "G19", "G20", "G21"}},
 		{"guardrail-compliance", "sonnet", "lane-guardrail-compliance-prompt.md", []string{"G14"}},
 	}
 
@@ -988,8 +1010,7 @@ func buildLanes(g17Dispatch Dispatch) []Lane {
 		GateIDs:            []string{"G17"},
 	})
 
-	// The style lane stays last so lanes[3] (guardrail-compliance) and
-	// lanes[4] (dimension-coverage) keep their indices.
+	// The style lane stays last. SKILL.md names lanes by name, not by index.
 	lanes = append(lanes, Lane{
 		Name:               "style-compliance",
 		SubagentType:       "general-purpose",
@@ -1814,6 +1835,7 @@ func planPrepareCore(mainRoot, contentRoot string, in PlanPrepareIn) (PlanPrepar
 		IntakeAuditDispatch: intakeAuditDispatch,
 		Lanes:               lanes,
 		LensReviewers:       lensReviewers,
+		GateChecks:          buildGateChecks(),
 		ReviewLoop:          ReviewLoop{MaxRounds: maxReviewRounds},
 		Template:            templateResolution,
 		Errors:              errs,
@@ -2611,8 +2633,11 @@ type PlanMarkOut struct {
 	OK       bool     `json:"ok"`
 	Marker   string   `json:"marker"`
 	Path     string   `json:"path"`
-	Next     string   `json:"next,omitempty"`     // checkpoint and review-outcome only
-	Warnings []string `json:"warnings,omitempty"` // done only: history write failed; the marker itself was saved
+	Next     string   `json:"next,omitempty"`                // checkpoint, review-outcome and done only
+	Warnings []string `json:"warnings,omitempty"`            // checkpoint: step time not recorded; done: history or evidence read failed; the marker itself was saved
+	Timing   string   `json:"timing,omitempty" render:"raw"` // done only: the Step 7 timing report
+	// StepTime is checkpoint only: what the call did to stepTimes.
+	StepTime *PlanStepTimeResult `json:"stepTime,omitempty"`
 }
 
 // planMark is the core logic, separated from the handler for testability.
@@ -2696,11 +2721,13 @@ func planMark(mainRoot, contentRoot string, in PlanMarkIn) (PlanMarkOut, error) 
 	}
 
 	// "checkpoint" replaces its own top-level state key on every call (no
-	// append, unlike the structured-data markers below). It and
-	// "review-outcome" are the only markers that return a non-empty Next.
+	// append, unlike the structured-data markers below). It, "review-outcome"
+	// and "done" are the only markers that return a non-empty Next. It also
+	// adds the first checkpoint of a step and iteration to stepTimes.
 	if in.Marker == "checkpoint" {
 		checkpoint.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 		st.Data["checkpoint"] = checkpoint
+		stepTime, warnings := recordStepTime(st, checkpoint)
 
 		refreshPlanTiming(st, contentRoot)
 		if err := state.Write(st); err != nil {
@@ -2710,7 +2737,7 @@ func planMark(mainRoot, contentRoot string, in PlanMarkIn) (PlanMarkOut, error) 
 				Cause:      err,
 			}
 		}
-		return PlanMarkOut{OK: true, Marker: in.Marker, Path: st.Path, Next: checkpointNext(mainRoot, checkpoint)}, nil
+		return PlanMarkOut{OK: true, Marker: in.Marker, Path: st.Path, Next: checkpointNext(mainRoot, checkpoint), Warnings: warnings, StepTime: stepTime}, nil
 	}
 
 	// "review-round" upserts its entry into reviewRounds by round. It
@@ -2803,6 +2830,7 @@ func planMark(mainRoot, contentRoot string, in PlanMarkIn) (PlanMarkOut, error) 
 		if herr := appendPlanRunRecord(mainRoot, branch, st); herr != nil {
 			out.Warnings = append(out.Warnings, "plan timing not saved to history: "+herr.Error())
 		}
+		attachPlanDoneTiming(&out, st)
 	}
 	return out, nil
 }
@@ -2817,7 +2845,7 @@ func planMark(mainRoot, contentRoot string, in PlanMarkIn) (PlanMarkOut, error) 
 // later task.
 func RegisterPlanTools(s *mcpserver.Server) {
 	mcpserver.Register(s, "plan_prepare",
-		"Prepare OpenSpec detection, guardrails, explore-pack discovery, and G17/lane/lens dispatch metadata for plan. "+
+		"Prepare OpenSpec detection, guardrails, explore-pack discovery, and G17/lane/lens dispatch metadata for plan, plus gateChecks (the Step 3 gate checks that start no sub-agent). "+
 			"Writes the plan state file and <runId>.evidence/guardrails.md and style-guide.md under gitignored .sdlc-v2/runs/. A call without resume or resolveTemplate starts a new run and deletes older runs' evidence for the branch. Optional: resume (post-compact recovery; reuses the active run, implies resolveTemplate, and fails when none exists). Returns runId, guardrailsFile, styleGuideFile and next. A failed state read, state write, guardrails write or style guide write returns an infrastructure error; the evidence cleanup is best-effort.",
 		mcpserver.Annotations{
 			Title:      "Prepare plan state and template",
@@ -2849,10 +2877,13 @@ func RegisterPlanTools(s *mcpserver.Server) {
 	mcpserver.Register(s, "plan_mark",
 		"INTERNAL — called by sdlc skills only. Write a plan-integrity checkpoint marker (plan-file, skillInvoked, guardrailsEvaluated, critiqueRan, done) into the current branch's plan state file, append structured data (guardrailResults, criticalDecisions) to it, replace the progress checkpoint (checkpoint), record a review round (review-round), or store the answers to the findings open at the review-loop limit (review-outcome). "+
 			"checkpoint: replace the progress checkpoint. Requires data.step (one of \"0\", \"1\", \"2\", \"3\", \"4\", \"5\", \"6\", \"6.5\", \"6.6\", \"7\"). Optional: data.iteration, data.expectedWriters. Returns next: the step-continuation sentence, plus the full custom plan instructions text (from [planStyle].instructions) when any are configured, plus a last-round sentence when step is \"5\" and iteration reaches the review-loop limit (plan_prepare's reviewLoop.maxRounds). Invalid input or a limit breach returns DomainError and writes nothing; an OS read/write failure returns InfraError. "+
+			"The first checkpoint of each step and iteration also adds {step, iteration, at} to the top-level stepTimes list, and the checkpoint returns stepTime {step, iteration, at, status}: status is added, kept (an earlier entry owns the time; at is its time) or not recorded. "+
+			"When stepTimes already holds "+strconv.Itoa(maxStepTimesStored)+" entries, the checkpoint is still saved, no entry is added, status is not recorded and the checkpoint returns a warning. A stepTimes value that is not a list is kept, status is not recorded, and the checkpoint returns a warning. "+
 			"review-round — Requires: data.round, data.mergedStatus, data.found, data.fixed, data.lenses. Optional: data.findings (max 200 {id, fixed}). Replaces the row with the same round. Returns no next. "+
 			"review-outcome — Requires: data.findings (1 to 200 {id, text, choice, reason}; choice is accepted, rejected, or stop). Pass every answered finding on every call: each call replaces the stored reviewOutcome. Returns next. Invalid input returns DomainError and writes nothing. "+
-			"Markers other than checkpoint and review-outcome return no next: the call only records state; continue the current SKILL.md step. "+
-			"The done marker also appends the plan's timing (start to last plan-file edit) to .sdlc-v2/history/runs.jsonl; a failed append returns ok with warnings set. Repeating done appends another history record.",
+			"Markers other than checkpoint, review-outcome and done return no next: the call only records state; continue the current SKILL.md step. "+
+			"The done marker also appends the plan's timing (start to last plan-file edit) to .sdlc-v2/history/runs.jsonl; a failed append returns ok with warnings set. Repeating done appends another history record. "+
+			"The done marker also returns timing: the Step 7 timing report (total, the time of each step, the "+strconv.Itoa(planTimingTopAgents)+" slowest agents). It reads planIntegrity, stepTimes and the run's evidence writer files (<runId>.evidence/*.json). Absent data shows as unknown in its line. An evidence folder that cannot be listed adds the warning \"Timing: cannot read evidence: <error>\"; each skipped writer file or stepTimes entry adds one warning; done still returns ok.",
 		mcpserver.Annotations{
 			Title:      "Record plan progress marker",
 			ReadOnly:   true,

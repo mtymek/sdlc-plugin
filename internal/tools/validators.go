@@ -7,6 +7,7 @@
 //   - plan_format  -- scripts/ci/validate-plan-format.js  (PF1-PF7, PF9, PF10),
 //     plus PF11-PF12 and the style (PF13) and diagram-contrast (PF14) checks
 //   - plan_style   -- the PF13 style measurement alone, with a styleReport
+//   - plan_gates   -- the count and lookup plan gates (plan_gates.go)
 //   - discovery    -- internal/discovery.ValidateAll       (PD1-PD16, reused as-is)
 //   - pr_template  -- scripts/ci/validate-pr-template.js   (V1-V5)
 //   - cost_tiers   -- scripts/ci/validate-cost-tiers.js    (DRIFT/MISSING_DOC/STALE_DOC/INHERITED, NO_COST_DOC)
@@ -80,12 +81,12 @@ import (
 type ValidateIn struct {
 	// Action selects the validator: plan_format | plan_style | discovery |
 	// pr_template | cost_tiers | guardrails | dimensions | pr_body |
-	// ci_script_drift | worktree_anchoring.
-	Action string `json:"action" jsonschema:"enum=plan_format,enum=plan_style,enum=discovery,enum=pr_template,enum=cost_tiers,enum=guardrails,enum=dimensions,enum=pr_body,enum=ci_script_drift,enum=worktree_anchoring" jsonschema_description:"Which validator to run: plan_format, plan_style, discovery, pr_template, cost_tiers, guardrails, dimensions, pr_body, ci_script_drift, or worktree_anchoring. Example: plan_style"`
+	// ci_script_drift | worktree_anchoring | plan_gates.
+	Action string `json:"action" jsonschema:"enum=plan_format,enum=plan_style,enum=discovery,enum=pr_template,enum=cost_tiers,enum=guardrails,enum=dimensions,enum=pr_body,enum=ci_script_drift,enum=worktree_anchoring,enum=plan_gates" jsonschema_description:"Which validator to run: plan_format, plan_style, discovery, pr_template, cost_tiers, guardrails, dimensions, pr_body, ci_script_drift, worktree_anchoring, or plan_gates. Example: plan_style"`
 	// File is the plan file for plan_format and plan_style (links_validate
 	// lives in links.go). For the dimensions action it names one dimension
 	// file: only its base name is matched.
-	File string `json:"file,omitempty" jsonschema_description:"Plan file to validate. Used by the plan_format and plan_style actions. The dimensions action uses it as the path of one review-dimension file: only the base name is matched, and the findings are those of that file plus the duplicate-name findings that name it. Example: ~/.claude/plans/x.md"`
+	File string `json:"file,omitempty" jsonschema_description:"Plan file to validate. Used by the plan_format, plan_style and plan_gates actions. A relative path resolves against the main worktree for plan_format and plan_style, and against the active worktree for plan_gates. The dimensions action uses it as the path of one review-dimension file: only the base name is matched, and the findings are those of that file plus the duplicate-name findings that name it. Example: ~/.claude/plans/x.md"`
 	// Final requests the stricter plan_format checks (PF9/PF10), matching
 	// the JS --final flag.
 	Final bool `json:"final,omitempty" jsonschema_description:"Requests the stricter plan_format checks (PF9/PF10). Used by the plan_format action."`
@@ -161,8 +162,9 @@ Pass "action" to select the validator. Each action uses a subset of the input fi
 
 validate only reports; the calling skill step decides the next action from findings and styleReport.
 
-- plan_format: Check a plan .md against PF1-PF7, PF11, PF12, PF13 (style limits from [style] and [planStyle]) and PF14 (Mermaid diagram color contrast, whole file), plus PF9 and PF10 when final is true. Requires file. Optional: final (adds the scorecard check PF9 and, with template, the section check PF10), template (plan template path: its required sections for PF10 and its narrative sections for PF13; omit it to skip PF10 and measure Context, Research Findings, Key Decisions and Final Shape).
-- plan_style: Measure a plan against the [planStyle] limits (and the strict STE rules when writingStandard is ste). Requires file. Optional: template (narrative sections to measure). Returns findings (PF13 failures) and styleReport on every call, pass or fail; styleReport.instructions lists the custom plan instructions for the handoff self-check.
+- plan_format: Check a plan .md against PF1-PF7, PF11, PF12, PF13 (style limits from [style] and [planStyle]) and PF14 (Mermaid diagram color contrast, whole file), plus PF9 and PF10 when final is true. Requires file. Optional: final (adds the scorecard check PF9 and, with template, the section check PF10), template (plan template path: its required sections for PF10 and its narrative sections for PF13; omit it to skip PF10 and measure Context, Research Findings, Key Decisions and Final Shape). A file over `+maxPlanFileText+` returns a DomainError that names the size and the limit.
+- plan_style: Measure a plan against the [planStyle] limits (and the strict STE rules when writingStandard is ste). Requires file. Optional: template (narrative sections to measure). Returns findings (PF13 failures) and styleReport on every call, pass or fail; styleReport.instructions lists the custom plan instructions for the handoff self-check. A file over `+maxPlanFileText+` returns a DomainError that names the size and the limit.
+- plan_gates: Check a plan .md against the count and lookup gates G3, G4, G8, G9, G10 and G12, plus the G18 floor (a Contract with no code block, table or diagram). Requires file. No optional fields. Reads the plan file (`+maxPlanFileText+` limit) and stats each Modify path. Both resolve against the ACTIVE worktree (a relative file path too); an unresolvable active worktree is an infrastructure error, never a silent fallback. Writes nothing. Returns findings with id G3, G4, G8, G9, G10, G12 or G18 and path = the plan file. Severity: G8 and G9 are warning; G3, G4, G10, G12 and G18 are error, except the G10 warnings for a task with no **Files:** block and for a Create, Modify or Test bullet with no path. Findings are sorted by gate number, then task number, then message. A Modify path that the plan text makes impossible to check (a parent is a file, a name too long, a symbolic link loop) is a G10 error finding; any other failed check of a Modify path (for example permission denied) returns an infrastructure error. A file with no "### Task N:" heading returns a DomainError: no gate was checked.
 - discovery: Check the project's discovery artifacts (PD1-PD16). No inputs.
 - pr_template: Check the PR template file itself (V1-V5) at its canonical or legacy path. No inputs.
 - cost_tiers: Compare skill/agent model tiers against the cost-tier doc tables in docs/cost-tiers.md. Optional: strict (true reports the INHERITED finding kind as severity "error" instead of "warning"). When docs/cost-tiers.md does not exist, the check is skipped and one NO_COST_DOC warning is returned.
@@ -191,12 +193,29 @@ validate only reports; the calling skill step decides the next action from findi
 	)
 }
 
+// activeRootOrInfraErr resolves the active worktree for an action that must
+// fail loud. The InfraError names the action and carries suggestion.
+func activeRootOrInfraErr(activeRoot func() (string, error), action, suggestion string) (string, error) {
+	r, err := activeRoot()
+	if err != nil {
+		return "", &mcpserver.InfraError{
+			Msg:        fmt.Sprintf("resolve active worktree for %s: %s", action, err.Error()),
+			Suggestion: suggestion,
+			Cause:      err,
+		}
+	}
+	return r, nil
+}
+
 // validateRoot picks the root an action reads from. dimensions and
-// ci_script_drift are the two actions whose target files must be read from
-// the ACTIVE worktree (root rule) — ci_script_drift because scaffold_ci now
-// writes there too (not the main worktree every other action anchors to);
-// both fail open to mainRoot when the active root cannot be resolved, so a
-// resolution error never blocks them. guardrails reads the active worktree
+// ci_script_drift read their target files from the ACTIVE worktree (root
+// rule) — ci_script_drift because scaffold_ci now writes there too (not the
+// main worktree every other action anchors to); both fail open to mainRoot
+// when the active root cannot be resolved, so a resolution error never blocks
+// them. plan_gates also reads the ACTIVE worktree (the plan's Modify paths
+// live on the active branch) but fails loud: a silent fallback to the main
+// worktree would report a clean G10 result for files nobody checked.
+// guardrails reads the active worktree
 // only when the caller opts in via ActiveWorktree (harden, which writes
 // guardrails to the active worktree and validates what it just wrote). That
 // opt-in fails loud instead: silently validating the main worktree would
@@ -208,16 +227,12 @@ func validateRoot(mainRoot string, in ValidateIn, activeRoot func() (string, err
 			return r, nil
 		}
 		return mainRoot, nil
+	case in.Action == "plan_gates":
+		return activeRootOrInfraErr(activeRoot, "plan_gates",
+			"Run validate from inside the active git working tree (not its .git directory), then retry plan_gates.")
 	case in.Action == "guardrails" && in.ActiveWorktree:
-		r, err := activeRoot()
-		if err != nil {
-			return "", &mcpserver.InfraError{
-				Msg:        fmt.Sprintf("resolve active worktree for guardrails activeWorktree:true: %s", err.Error()),
-				Suggestion: "Run validate from inside the active git working tree (not its .git directory), or omit activeWorktree to validate the main worktree's config, then retry.",
-				Cause:      err,
-			}
-		}
-		return r, nil
+		return activeRootOrInfraErr(activeRoot, "guardrails activeWorktree:true",
+			"Run validate from inside the active git working tree (not its .git directory), or omit activeWorktree to validate the main worktree's config, then retry.")
 	default:
 		return mainRoot, nil
 	}
@@ -235,6 +250,8 @@ func validate(root string, in ValidateIn) (ValidateOut, error) {
 		findings, err = validatePlanFormat(root, in)
 	case "plan_style":
 		findings, style, err = validatePlanStyle(root, in)
+	case "plan_gates":
+		findings, err = validatePlanGates(root, in)
 	case "discovery":
 		findings = discovery.ValidateAll(root)
 	case "pr_template":
@@ -253,7 +270,7 @@ func validate(root string, in ValidateIn) (ValidateOut, error) {
 		anchor, findings, err = validateWorktreeAnchoring(root)
 	default:
 		return ValidateOut{}, unknownActionError("validate action", in.Action, "",
-			"pass one of the valid actions: plan_format, plan_style, discovery, pr_template, cost_tiers, guardrails, dimensions, pr_body, ci_script_drift, worktree_anchoring")
+			"pass one of the valid actions: plan_format, plan_style, discovery, pr_template, cost_tiers, guardrails, dimensions, pr_body, ci_script_drift, worktree_anchoring, plan_gates")
 	}
 	if err != nil {
 		return ValidateOut{}, err
@@ -332,12 +349,21 @@ type planTask struct {
 	Body   string
 }
 
+// maxPlanFileBytes is the largest plan file readPlanFile reads, and
+// maxPlanFileText is the same limit as text for messages and descriptions.
+const (
+	maxPlanFileBytes = 8 << 20
+	maxPlanFileText  = "8 MiB"
+)
+
 // readPlanFile resolves file against root and reads it. Every failure carries
 // a Suggestion (guardrail mcp-error-suggestion-coverage), and the three
 // failures are kept apart: no file passed, the path does not exist, and the
 // path exists but cannot be read (permission denied, a directory, an I/O
 // error). Reporting the last two as one "file not found" sends the caller to
-// re-check a path that is already correct.
+// re-check a path that is already correct. A regular file over
+// maxPlanFileBytes is refused before the read, so plan_format, plan_style and
+// plan_gates share one size limit.
 func readPlanFile(root, file, action string) (filePath, content string, err error) {
 	if file == "" {
 		return "", "", &mcpserver.DomainError{
@@ -346,6 +372,12 @@ func readPlanFile(root, file, action string) (filePath, content string, err erro
 		}
 	}
 	filePath = resolvePath(root, file)
+	if fi, serr := os.Stat(filePath); serr == nil && fi.Mode().IsRegular() && fi.Size() > maxPlanFileBytes {
+		return "", "", &mcpserver.DomainError{
+			Msg:        fmt.Sprintf("%s: file is %d bytes, over the %s limit (%d bytes): %s", action, fi.Size(), maxPlanFileText, maxPlanFileBytes, filePath),
+			Suggestion: "Pass the path of the plan .md file. A plan file is never this large.",
+		}
+	}
 	data, rerr := os.ReadFile(filePath)
 	if rerr != nil {
 		return "", "", planReadError(action, "file", filePath, rerr)
@@ -360,6 +392,16 @@ func readPlanFile(root, file, action string) (filePath, content string, err erro
 // helper serves every read site. Only fs.ErrNotExist is reported as
 // not-found; anything else names the read failure so the caller looks at
 // permissions and the file type instead of the path.
+// planFileRootName names the root a relative plan path resolves against:
+// plan_gates reads the active worktree (validateRoot), the other plan actions
+// the main worktree.
+func planFileRootName(action string) string {
+	if action == "plan_gates" {
+		return "active worktree root (the checkout of the current branch)"
+	}
+	return "main worktree root"
+}
+
 func planReadError(action, what, path string, rerr error) *mcpserver.DomainError {
 	if errors.Is(rerr, fs.ErrNotExist) {
 		if what == "template" {
@@ -371,7 +413,7 @@ func planReadError(action, what, path string, rerr error) *mcpserver.DomainError
 		}
 		return &mcpserver.DomainError{
 			Msg:        fmt.Sprintf("%s: file not found: %s", action, path),
-			Suggestion: "Check the path. A relative path resolves against the project root.",
+			Suggestion: "Check the path. A relative path resolves against the " + planFileRootName(action) + ".",
 			Cause:      rerr,
 		}
 	}
@@ -681,33 +723,44 @@ var fenceOpenRe = regexp.MustCompile("^(`{3,})")
 // backreference regex ^(`{3,})[^\n]*\n[\s\S]*?^\1`*[ \t]*$).
 func stripFences(content string) string {
 	lines := strings.Split(content, "\n")
+	inFence := fenceLines(lines)
 	var out []string
-	i := 0
-	for i < len(lines) {
-		m := fenceOpenRe.FindStringSubmatch(lines[i])
-		if m == nil {
-			out = append(out, lines[i])
-			i++
-			continue
-		}
-		n := len(m[1])
-		closeRe := regexp.MustCompile(fmt.Sprintf("^`{%d,}[ \\t]*$", n))
-		j := i + 1
-		closed := false
-		for ; j < len(lines); j++ {
-			if closeRe.MatchString(lines[j]) {
-				closed = true
-				break
-			}
-		}
-		if closed {
-			i = j + 1
-		} else {
-			out = append(out, lines[i])
-			i++
+	for i, line := range lines {
+		if !inFence[i] {
+			out = append(out, line)
 		}
 	}
 	return strings.Join(out, "\n")
+}
+
+// fenceLines marks each line that belongs to a column-0 fence, the open and
+// close lines included. A fence opens with three or more backticks and closes
+// at the first line of at least as many backticks (trailing spaces allowed).
+// An unclosed open line is not a fence: it and the lines after it stay
+// unmarked. stripFences and rawTaskBodies (plan_gates.go) share this rule.
+func fenceLines(lines []string) []bool {
+	inFence := make([]bool, len(lines))
+	for i := 0; i < len(lines); {
+		m := fenceOpenRe.FindStringSubmatch(lines[i])
+		if m == nil {
+			i++
+			continue
+		}
+		closeRe := regexp.MustCompile(fmt.Sprintf("^`{%d,}[ \\t]*$", len(m[1])))
+		j := i + 1
+		for j < len(lines) && !closeRe.MatchString(lines[j]) {
+			j++
+		}
+		if j == len(lines) {
+			i++
+			continue
+		}
+		for k := i; k <= j; k++ {
+			inFence[k] = true
+		}
+		i = j + 1
+	}
+	return inFence
 }
 
 var taskHeaderRe = regexp.MustCompile(`(?m)^### Task (\d+):\s*(.+)$`)
@@ -923,21 +976,9 @@ func checkPF3(tasks []planTask) pfCheck {
 			dependsBad = true
 		}
 
-		verify, ok := extractField(t.Body, "Verify")
-		if !ok || verify == "" {
-			issues = append(issues, prefix+": missing **Verify:** (expected: "+pf3VerifyExpected()+")")
+		if issue, bad := checkVerifyField(t); bad {
+			issues = append(issues, prefix+issue)
 			verifyBad = true
-		} else {
-			var invalid []string
-			for _, v := range splitVerifyValues(verify) {
-				if !validVerifyValue(v) {
-					invalid = append(invalid, fmt.Sprintf("%q", strings.TrimSpace(v)))
-				}
-			}
-			if len(invalid) > 0 {
-				issues = append(issues, fmt.Sprintf("%s: invalid Verify value(s): %s (expected: %s)", prefix, strings.Join(invalid, ", "), pf3VerifyExpected()))
-				verifyBad = true
-			}
 		}
 	}
 	if len(issues) == 0 {
@@ -951,6 +992,28 @@ func checkPF3(tasks []planTask) pfCheck {
 		fix = append(fix, pf3VerifyFix)
 	}
 	return pfFail("PF3", pfIssueList("Invalid or missing task metadata:", issues), pfLines(fix...))
+}
+
+// checkVerifyField checks one task's **Verify:** field. It returns the issue
+// text that follows the "Task N" prefix (for example
+// ": missing **Verify:** (expected: ...)") and bad=true when the field is
+// absent, empty or holds an invalid value. PF3 and the plan_gates G8 check
+// share it, so both report the same text.
+func checkVerifyField(t planTask) (issue string, bad bool) {
+	verify, ok := extractField(t.Body, "Verify")
+	if !ok || verify == "" {
+		return ": missing **Verify:** (expected: " + pf3VerifyExpected() + ")", true
+	}
+	var invalid []string
+	for _, v := range splitVerifyValues(verify) {
+		if !validVerifyValue(v) {
+			invalid = append(invalid, fmt.Sprintf("%q", strings.TrimSpace(v)))
+		}
+	}
+	if len(invalid) > 0 {
+		return fmt.Sprintf(": invalid Verify value(s): %s (expected: %s)", strings.Join(invalid, ", "), pf3VerifyExpected()), true
+	}
+	return "", false
 }
 
 // pf3VerifyExpected is the accepted Verify shape shown in PF3's messages: the
