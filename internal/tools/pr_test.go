@@ -3569,3 +3569,196 @@ func TestPrApply_JJMode(t *testing.T) {
 		}
 	})
 }
+
+// jjPrepareRT builds a pr_prepare runtime in jj mode on the given bookmark
+// and ref table (ref name -> sha; a missing key means the ref is absent).
+func jjPrepareRT(bookmark string, refs map[string]string) prRuntime {
+	return prRuntime{
+		vcsDetect: func(dir string) (gitx.VCSInfo, error) {
+			return gitx.VCSInfo{Mode: gitx.ModeJJ, Root: dir, JJVersion: "0.46.0"}, nil
+		},
+		ghAuthProbe: func(dir, host string) ghx.AuthProbeResult {
+			return ghx.AuthProbeResult{Authenticated: true, ActiveAccount: "someone"}
+		},
+		configReadSection: func(root, section string) (map[string]any, error) { return nil, nil },
+		configRead:        func(root string) (*config.Config, error) { return nil, nil },
+		execRun: func(name string, args []string, opts execx.Options) (string, error) {
+			return "", errors.New("fatal: no such remote 'origin'")
+		},
+		gitCurrentBranch: func(dir string) (string, error) { return bookmark, nil },
+		gitStatus:        func(dir string) (string, error) { return "", nil },
+		gitDefaultBranch: func(dir string) (string, error) { return "main", nil },
+		gitBaseBranch:    func(dir, configured string) (string, error) { return "main", nil },
+		gitRefCommit: func(dir, ref string) (string, bool, error) {
+			sha, ok := refs[ref]
+			return sha, ok, nil
+		},
+		// A git upstream check in jj mode would be a bug: fail loudly.
+		gitHasUpstream:  func(dir string) (bool, error) { panic("gitHasUpstream called in jj mode") },
+		gitCommitsAhead: func(dir string) (int, error) { panic("gitCommitsAhead called in jj mode") },
+		branchValidate:  branch.ValidateExpectedBranch,
+		jiraExtract:     func(string) string { return "" },
+		templateResolve: func(root string) (*prtemplate.Template, error) { return nil, nil },
+	}
+}
+
+func TestPrPrepare_JJ_PushStatus(t *testing.T) {
+	cases := []struct {
+		name     string
+		bookmark string
+		refs     map[string]string
+		wantPush bool
+		wantWarn string
+		wantNext string
+	}{
+		{"match", "feat/x", map[string]string{"refs/heads/feat/x": "a", "refs/remotes/origin/feat/x": "a"}, false, "", ""},
+		{"no remote", "feat/x", map[string]string{"refs/heads/feat/x": "a"}, true,
+			"jj mode: run jj git push -b feat/x before pr_apply", "jj mode: push the bookmark with jj git push -b feat/x, then call pr_apply."},
+		{"differs", "feat/x", map[string]string{"refs/heads/feat/x": "a", "refs/remotes/origin/feat/x": "b"}, true,
+			"jj mode: run jj git push -b feat/x before pr_apply", "jj mode: push the bookmark with jj git push -b feat/x, then call pr_apply."},
+		{"no bookmark", "HEAD", nil, true,
+			"jj mode: no bookmark on @ or @-; create one with jj bookmark create",
+			"jj mode: create a bookmark with jj bookmark create <name> -r @-, push it, then call pr_prepare again."},
+		{"no local git branch", "feat/x", nil, true, "jj push check: ", "Fix the repository error above, then call pr_prepare again."},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := prPrepareCoreWith("/mock/root", "/mock/work", PRPrepareIn{SkipConfigCheck: true}, jjPrepareRT(tc.bookmark, tc.refs))
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if out.NeedsPush != tc.wantPush {
+				t.Errorf("NeedsPush: got %v, want %v", out.NeedsPush, tc.wantPush)
+			}
+			found := false
+			for _, w := range out.Warnings {
+				if strings.HasPrefix(w, tc.wantWarn) && tc.wantWarn != "" {
+					found = true
+				}
+			}
+			if tc.wantWarn != "" && !found {
+				t.Errorf("warnings %q lack %q", out.Warnings, tc.wantWarn)
+			}
+			for _, w := range out.Warnings {
+				if tc.wantWarn == "" && strings.Contains(w, "jj ") {
+					t.Errorf("unexpected jj warning: %q", w)
+				}
+			}
+			if tc.wantNext == "" {
+				if !strings.HasPrefix(out.Next, "Call pr_apply") {
+					t.Errorf("Next: got %q, want today's text", out.Next)
+				}
+			} else if out.Next != tc.wantNext {
+				t.Errorf("Next: got %q, want %q", out.Next, tc.wantNext)
+			}
+		})
+	}
+}
+
+func TestPrPrepare_JJ_DetectorError_NeedsPush(t *testing.T) {
+	rt := jjPrepareRT("feat/x", nil)
+	rt.vcsDetect = func(dir string) (gitx.VCSInfo, error) { return gitx.VCSInfo{}, errors.New("boom") }
+	out, err := prPrepareCoreWith("/mock/root", "/mock/work", PRPrepareIn{SkipConfigCheck: true}, rt)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !out.NeedsPush {
+		t.Error("NeedsPush: want true")
+	}
+	found := false
+	for _, w := range out.Warnings {
+		found = found || w == "jj push check: boom"
+	}
+	if !found {
+		t.Errorf("warnings: %q", out.Warnings)
+	}
+}
+
+func TestPrPrepare_JJ_DetectorError_Next(t *testing.T) {
+	rt := jjPrepareRT("feat/x", nil)
+	rt.vcsDetect = func(dir string) (gitx.VCSInfo, error) { return gitx.VCSInfo{}, errors.New("boom") }
+	out, _ := prPrepareCoreWith("/mock/root", "/mock/work", PRPrepareIn{SkipConfigCheck: true}, rt)
+	if want := "Fix the repository error above, then call pr_prepare again."; out.Next != want {
+		t.Errorf("Next: got %q, want %q", out.Next, want)
+	}
+}
+
+func TestPrPrepare_JJ_CurrentBranchError(t *testing.T) {
+	rt := jjPrepareRT("feat/x", nil)
+	rt.gitCurrentBranch = func(dir string) (string, error) { return "", errors.New("two bookmarks") }
+	out, err := prPrepareCoreWith("/mock/root", "/mock/work", PRPrepareIn{SkipConfigCheck: true}, rt)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !out.NeedsPush {
+		t.Error("NeedsPush: want true")
+	}
+	found := false
+	for _, w := range out.Warnings {
+		found = found || w == "jj push check: two bookmarks"
+	}
+	if !found {
+		t.Errorf("warnings: %q", out.Warnings)
+	}
+}
+
+// TestPrApplyPrepare_JJ_PushCommandParity runs the same jj states through
+// both tools and pins the shared push command text.
+func TestPrApplyPrepare_JJ_PushCommandParity(t *testing.T) {
+	const b = "feat/x"
+	local, remote := "refs/heads/"+b, "refs/remotes/origin/"+b
+	cases := []struct {
+		name, bookmark string
+		refs           map[string]string
+		lookupErr      bool
+		cmd            string
+	}{
+		{"no remote", b, map[string]string{local: "a"}, false, "jj git push -b feat/x"},
+		{"differs", b, map[string]string{local: "a", remote: "b"}, false, "jj git push -b feat/x"},
+		{"no bookmark", "HEAD", nil, false, "jj bookmark create <name> -r @-"},
+		{"ref error", b, map[string]string{local: "a"}, true, "git rev-parse refs/remotes/origin/feat/x"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			refErr := func(dir, ref string) (string, bool, error) {
+				if ref == remote {
+					return "", false, errors.New("boom")
+				}
+				sha, ok := tc.refs[ref]
+				return sha, ok, nil
+			}
+			art := jjApplyRuntime(t, tc.bookmark, tc.refs)
+			failOnRemoteWrites(t, &art)
+			prt := jjPrepareRT(tc.bookmark, tc.refs)
+			if tc.lookupErr {
+				art.gitRefCommit, prt.gitRefCommit = refErr, refErr
+			}
+			_, applyErr := prApplyCoreWith("/mock/root", "/mock/work", jjApplyIn(), art)
+			var sugg string
+			var de *mcpserver.DomainError
+			var ie *mcpserver.InfraError
+			switch {
+			case errors.As(applyErr, &de):
+				sugg = de.Suggestion
+			case errors.As(applyErr, &ie):
+				sugg = ie.Suggestion
+			default:
+				t.Fatalf("pr_apply: unexpected error %v", applyErr)
+			}
+			out, err := prPrepareCoreWith("/mock/root", "/mock/work", PRPrepareIn{SkipConfigCheck: true}, prt)
+			if err != nil {
+				t.Fatalf("pr_prepare: %v", err)
+			}
+			if !strings.Contains(sugg, tc.cmd) {
+				t.Errorf("pr_apply suggestion %q lacks %q", sugg, tc.cmd)
+			}
+			warn := strings.Join(out.Warnings, "\n") + "\n" + out.Next
+			if !strings.Contains(warn, tc.cmd) && !tc.lookupErr {
+				t.Errorf("pr_prepare warning/next %q lacks %q", warn, tc.cmd)
+			}
+			if tc.lookupErr && !strings.Contains(strings.Join(out.Warnings, "\n"), "boom") {
+				t.Errorf("pr_prepare warnings %q lack the ref error", out.Warnings)
+			}
+		})
+	}
+}

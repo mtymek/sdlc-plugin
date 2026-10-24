@@ -67,6 +67,16 @@ repository default branch when that key is absent or empty.
   and the run continues on the previous base.
 - Turn this off with `[execute] baseSync = false`.
 
+## jj mode
+
+In a colocated jj repository (`.jj/` and `.git/` side by side) `/execute` reads `vcs` and `next` from `resolve-config` and follows `next` before anything else.
+
+- A `next` that starts with `Stop` or `jj mode: stop` ends the run before any state is written. Re-run after fixing the cause:
+  - `jj mode: stop. Wave commits do not run in jj repositories yet. Set execute.commitWaves = false in .sdlc-v2/config.toml, then re-run /execute.`
+  - `jj mode: stop. Create a feature bookmark with jj bookmark create <name> -r @, then re-run /execute.`
+- Otherwise the run continues on the bookmark (`vcs.branch`) with `execute.commitWaves = false`. Wave changes stay in `@`; the report ends with `jj mode: wave changes are uncommitted in @; commit them with jj commit.`
+- The pre-execution rebase and the base-sync stage are skipped with `jj mode: rebase skipped — run jj git fetch, then jj rebase -d <base>@origin.`
+
 ## Examples
 
 **Execute a plan with default settings:**

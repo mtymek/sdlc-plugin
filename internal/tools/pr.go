@@ -713,6 +713,10 @@ func prPrepareCoreWith(mainRoot, workDir string, in PRPrepareIn, rt prRuntime) (
 	currentBranch, err := rt.gitCurrentBranch(workDir)
 	if err != nil {
 		errs = append(errs, err.Error())
+		if info, vcsErr := rt.vcsDetect(workDir); vcsErr == nil && info.Mode == gitx.ModeJJ {
+			warnings = append(warnings, fmt.Sprintf("jj push check: %s", err.Error()))
+			out.NeedsPush = true
+		}
 		out.Errors = errs
 		out.Warnings = warnings
 		out.Next = prPrepareNext(out)
@@ -767,7 +771,20 @@ func prPrepareCoreWith(mainRoot, workDir string, in PRPrepareIn, rt prRuntime) (
 	// create/edit the PR. An upstream-check failure degrades to a warning
 	// plus a fail-safe NeedsPush: true, matching every other diagnostic
 	// failure in this function.
-	if hasUpstream, upErr := rt.gitHasUpstream(workDir); upErr != nil {
+	jjNext := ""
+	if info, vcsErr := rt.vcsDetect(workDir); vcsErr != nil {
+		warnings = append(warnings, fmt.Sprintf("jj push check: %s", vcsErr.Error()))
+		out.NeedsPush = true
+		jjNext = jjNextRepoError
+	} else if info.Mode == gitx.ModeJJ {
+		// jj leaves HEAD detached, so the git upstream check cannot run:
+		// compare the bookmark with origin/<bookmark> instead.
+		var w string
+		out.NeedsPush, w, jjNext = prPrepareJJPush(rt, workDir, currentBranch)
+		if w != "" {
+			warnings = append(warnings, w)
+		}
+	} else if hasUpstream, upErr := rt.gitHasUpstream(workDir); upErr != nil {
 		warnings = append(warnings, fmt.Sprintf("upstream check: %s", upErr.Error()))
 		out.NeedsPush = true
 	} else if !hasUpstream {
@@ -857,7 +874,31 @@ func prPrepareCoreWith(mainRoot, workDir string, in PRPrepareIn, rt prRuntime) (
 	out.Warnings = warnings
 	out.OK = len(errs) == 0
 	out.Next = prPrepareNext(out)
+	if jjNext != "" && out.OK {
+		out.Next = jjNext
+	}
 	return out, nil
+}
+
+const jjNextRepoError = "Fix the repository error above, then call pr_prepare again."
+
+// prPrepareJJPush derives needsPush, the warning and the next text for jj
+// mode from the bookmark check. An empty next means today's text. It never
+// writes.
+func prPrepareJJPush(rt prRuntime, workDir, bookmark string) (needsPush bool, warning, next string) {
+	if bookmark == "HEAD" {
+		return true, "jj mode: no bookmark on @ or @-; create one with jj bookmark create",
+			"jj mode: create a bookmark with jj bookmark create <name> -r @-, push it, then call pr_prepare again."
+	}
+	state, err := jjBookmarkPushState(rt, workDir, bookmark)
+	if err != nil {
+		return true, fmt.Sprintf("jj push check: %s", err.Error()), jjNextRepoError
+	}
+	if state == jjPushMatch {
+		return false, "", ""
+	}
+	return true, fmt.Sprintf("jj mode: run jj git push -b %s before pr_apply", bookmark),
+		fmt.Sprintf("jj mode: push the bookmark with jj git push -b %s, then call pr_apply.", bookmark)
 }
 
 // ---------------------------------------------------------------------------
@@ -1811,7 +1852,7 @@ func prReleaseApplyLabelWith(rt prRuntime, workDir, label string, stale []string
 // responsibility.
 func RegisterPRTools(s *mcpserver.Server) {
 	mcpserver.Register(s, "pr_prepare",
-		"Preflight checks for pr: config-version gate (also moves personal keys such as pr.expectedAccount from config.toml to local.toml, with a warning; fails with manual steps when the move is not safe), gh-auth + active-account probe (expected account from local.toml [github] expectedAccount; recovery-shaped diagnostics on failure), branch-guard hard gate, protected-branch rejection, JIRA ticket detection from the branch name, PR template resolution, upstream/push status (needsPush), and version diagnostics (bump options, tags, commits since tag, conventional commit summary, existing RCs) when a version config exists. A config.toml that fails to read skips those diagnostics with a warning naming the error. Also returns style: the plugin-wide communication style; follow style.guide in chat and questions.",
+		"Preflight checks for pr: config-version gate (also moves personal keys such as pr.expectedAccount from config.toml to local.toml, with a warning; fails with manual steps when the move is not safe), gh-auth + active-account probe (expected account from local.toml [github] expectedAccount; recovery-shaped diagnostics on failure), branch-guard hard gate, protected-branch rejection, JIRA ticket detection from the branch name, PR template resolution, upstream/push status (needsPush; in a jj repository needsPush compares the bookmark with origin/<bookmark>; pr never pushes in jj mode), and version diagnostics (bump options, tags, commits since tag, conventional commit summary, existing RCs) when a version config exists. A config.toml that fails to read skips those diagnostics with a warning naming the error. Also returns style: the plugin-wide communication style; follow style.guide in chat and questions.",
 		mcpserver.Annotations{
 			Title:       "Prepare pull request context",
 			ReadOnly:    false,

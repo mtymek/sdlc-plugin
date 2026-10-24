@@ -190,6 +190,14 @@ On `--resume`, the saved status of the step decides what ship does:
   `/sdlc:received-review` to get them back. With `--auto`, ship does the
   same and asks nothing.
 
+## jj mode
+
+In a colocated jj repository `/ship` stops at step 3, before `ship_prepare` and before any state is written. Step 3 calls `ship_state({action:"vcs-mode"})` and prints its `next`:
+
+`jj mode: stop. Ship does not run in jj repositories yet. Run /execute with execute.commitWaves = false, commit with jj commit, push with jj git push -b <bookmark>, then run /pr.`
+
+Git repositories run step 3 as written.
+
 ## Examples
 
 **Ship with a plan file:**
