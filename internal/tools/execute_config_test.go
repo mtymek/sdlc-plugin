@@ -25,12 +25,13 @@ import (
 // TestExecActionResolveConfig_Defaults tests resolution with no config and no
 // flags: auto=false, quality="", highRiskAutoApprove=false, all sources default/unset.
 func TestExecActionResolveConfig_Defaults(t *testing.T) {
+	stubVCS(t, gitInfo, nil, "main", nil, "main", "main")
 	root := t.TempDir()
 	// Empty config files, no ship state
 	writeFile(t, filepath.Join(root, paths.DataDir, "config.toml"), "")
 	writeFile(t, filepath.Join(root, paths.DataDir, "local.toml"), "")
 
-	out, err := execActionResolveConfig(root, ExecuteStateIn{})
+	out, err := execActionResolveConfig(root, root, ExecuteStateIn{})
 	if err != nil {
 		t.Fatalf("execActionResolveConfig: %v", err)
 	}
@@ -62,6 +63,7 @@ func TestExecActionResolveConfig_Defaults(t *testing.T) {
 // TestExecActionResolveConfig_FromConfig tests reading all three keys from
 // local [executePrefs].
 func TestExecActionResolveConfig_FromConfig(t *testing.T) {
+	stubVCS(t, gitInfo, nil, "main", nil, "main", "main")
 	root := t.TempDir()
 	localTOML := `[executePrefs]
 auto = true
@@ -71,7 +73,7 @@ highRiskAutoApprove = true
 	writeFile(t, filepath.Join(root, paths.DataDir, "config.toml"), "")
 	writeFile(t, filepath.Join(root, paths.DataDir, "local.toml"), localTOML)
 
-	out, err := execActionResolveConfig(root, ExecuteStateIn{})
+	out, err := execActionResolveConfig(root, root, ExecuteStateIn{})
 	if err != nil {
 		t.Fatalf("execActionResolveConfig: %v", err)
 	}
@@ -99,6 +101,7 @@ highRiskAutoApprove = true
 
 // TestExecActionResolveConfig_FlagWinsOverConfig tests that CLI flags override config.
 func TestExecActionResolveConfig_FlagWinsOverConfig(t *testing.T) {
+	stubVCS(t, gitInfo, nil, "main", nil, "main", "main")
 	root := t.TempDir()
 	localTOML := `[executePrefs]
 auto = false
@@ -107,7 +110,7 @@ quality = "minimal"
 	writeFile(t, filepath.Join(root, paths.DataDir, "config.toml"), "")
 	writeFile(t, filepath.Join(root, paths.DataDir, "local.toml"), localTOML)
 
-	out, err := execActionResolveConfig(root, ExecuteStateIn{
+	out, err := execActionResolveConfig(root, root, ExecuteStateIn{
 		Auto:    true,
 		Quality: "full",
 	})
@@ -133,6 +136,7 @@ quality = "minimal"
 // TestExecActionResolveConfig_PipelineAutoFromShipState tests that pipeline auto
 // is read from ship state when no CLI flag and no config.auto.
 func TestExecActionResolveConfig_PipelineAutoFromShipState(t *testing.T) {
+	stubVCS(t, gitInfo, nil, "main", nil, "main", "main")
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, paths.DataDir, "config.toml"), "")
 	writeFile(t, filepath.Join(root, paths.DataDir, "local.toml"), "")
@@ -144,7 +148,7 @@ func TestExecActionResolveConfig_PipelineAutoFromShipState(t *testing.T) {
 		},
 	})
 
-	out, err := execActionResolveConfig(root, ExecuteStateIn{
+	out, err := execActionResolveConfig(root, root, ExecuteStateIn{
 		Branch: "feature/test",
 	})
 	if err != nil {
@@ -163,6 +167,7 @@ func TestExecActionResolveConfig_PipelineAutoFromShipState(t *testing.T) {
 // TestExecActionResolveConfig_AutoDefaultsQualityToBalanced tests that quality
 // defaults to "balanced" when auto=true and no quality is supplied.
 func TestExecActionResolveConfig_AutoDefaultsQualityToBalanced(t *testing.T) {
+	stubVCS(t, gitInfo, nil, "main", nil, "main", "main")
 	root := t.TempDir()
 	localTOML := `[executePrefs]
 auto = true
@@ -170,7 +175,7 @@ auto = true
 	writeFile(t, filepath.Join(root, paths.DataDir, "config.toml"), "")
 	writeFile(t, filepath.Join(root, paths.DataDir, "local.toml"), localTOML)
 
-	out, err := execActionResolveConfig(root, ExecuteStateIn{})
+	out, err := execActionResolveConfig(root, root, ExecuteStateIn{})
 	if err != nil {
 		t.Fatalf("execActionResolveConfig: %v", err)
 	}
@@ -187,11 +192,12 @@ auto = true
 // TestExecActionResolveConfig_NoAutoLeavesQualityUnset tests that quality
 // stays empty when auto=false and no quality is supplied.
 func TestExecActionResolveConfig_NoAutoLeavesQualityUnset(t *testing.T) {
+	stubVCS(t, gitInfo, nil, "main", nil, "main", "main")
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, paths.DataDir, "config.toml"), "")
 	writeFile(t, filepath.Join(root, paths.DataDir, "local.toml"), "")
 
-	out, err := execActionResolveConfig(root, ExecuteStateIn{
+	out, err := execActionResolveConfig(root, root, ExecuteStateIn{
 		Auto: false,
 	})
 	if err != nil {
@@ -210,6 +216,7 @@ func TestExecActionResolveConfig_NoAutoLeavesQualityUnset(t *testing.T) {
 // TestExecActionResolveConfig_InvalidQualityWarns tests that an invalid quality
 // value in config triggers a warning and quality ends up unset.
 func TestExecActionResolveConfig_InvalidQualityWarns(t *testing.T) {
+	stubVCS(t, gitInfo, nil, "main", nil, "main", "main")
 	root := t.TempDir()
 	localTOML := `[executePrefs]
 quality = "turbo"
@@ -217,7 +224,7 @@ quality = "turbo"
 	writeFile(t, filepath.Join(root, paths.DataDir, "config.toml"), "")
 	writeFile(t, filepath.Join(root, paths.DataDir, "local.toml"), localTOML)
 
-	out, err := execActionResolveConfig(root, ExecuteStateIn{})
+	out, err := execActionResolveConfig(root, root, ExecuteStateIn{})
 	if err != nil {
 		t.Fatalf("execActionResolveConfig: %v", err)
 	}
@@ -241,6 +248,7 @@ quality = "turbo"
 // TestExecActionResolveConfig_WrongTypeWarns tests that a wrong-type value
 // for highRiskAutoApprove in config triggers a warning and falls back to default.
 func TestExecActionResolveConfig_WrongTypeWarns(t *testing.T) {
+	stubVCS(t, gitInfo, nil, "main", nil, "main", "main")
 	root := t.TempDir()
 	localTOML := `[executePrefs]
 highRiskAutoApprove = "yes"
@@ -248,7 +256,7 @@ highRiskAutoApprove = "yes"
 	writeFile(t, filepath.Join(root, paths.DataDir, "config.toml"), "")
 	writeFile(t, filepath.Join(root, paths.DataDir, "local.toml"), localTOML)
 
-	out, err := execActionResolveConfig(root, ExecuteStateIn{})
+	out, err := execActionResolveConfig(root, root, ExecuteStateIn{})
 	if err != nil {
 		t.Fatalf("execActionResolveConfig: %v", err)
 	}
@@ -274,6 +282,7 @@ highRiskAutoApprove = "yes"
 // only in execActionInit's. Uses the same corrupt-JSON technique as
 // TestExecState_Init_PipelineAuto's "corrupt ship state" subtest.
 func TestExecActionResolveConfig_UnreadableShipStateWarns(t *testing.T) {
+	stubVCS(t, gitInfo, nil, "main", nil, "main", "main")
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, paths.DataDir, "config.toml"), "")
 	writeFile(t, filepath.Join(root, paths.DataDir, "local.toml"), "")
@@ -288,7 +297,7 @@ func TestExecActionResolveConfig_UnreadableShipStateWarns(t *testing.T) {
 		t.Fatalf("corrupt ship state: %v", err)
 	}
 
-	out, err := execActionResolveConfig(root, ExecuteStateIn{Branch: "feat/unreadable"})
+	out, err := execActionResolveConfig(root, root, ExecuteStateIn{Branch: "feat/unreadable"})
 	if err != nil {
 		t.Fatalf("execActionResolveConfig: %v", err)
 	}
@@ -313,12 +322,13 @@ func TestExecActionResolveConfig_UnreadableShipStateWarns(t *testing.T) {
 // than collapse silently into "section not configured" and resolve to the
 // built-in defaults with no signal.
 func TestExecActionResolveConfig_UnreadableConfigWarns(t *testing.T) {
+	stubVCS(t, gitInfo, nil, "main", nil, "main", "main")
 	root := t.TempDir()
 	// Unclosed table header — a TOML parse error, not a missing section.
 	writeFile(t, filepath.Join(root, paths.DataDir, "config.toml"), "[execute\nauto = true\n")
 	writeFile(t, filepath.Join(root, paths.DataDir, "local.toml"), "")
 
-	out, err := execActionResolveConfig(root, ExecuteStateIn{})
+	out, err := execActionResolveConfig(root, root, ExecuteStateIn{})
 	if err != nil {
 		t.Fatalf("execActionResolveConfig: %v", err)
 	}
@@ -344,6 +354,7 @@ func TestExecActionResolveConfig_UnreadableConfigWarns(t *testing.T) {
 // config > auto-default > unset path an absent flag takes. Erroring instead
 // would reject the legacy A/B/C tiers the execute skill still accepts.
 func TestExecActionResolveConfig_InvalidCLIQualityWarnsAndFallsThrough(t *testing.T) {
+	stubVCS(t, gitInfo, nil, "main", nil, "main", "main")
 	assertWarned := func(t *testing.T, result ExecuteResolveConfigOut) {
 		t.Helper()
 		if result.Sources["quality"] == "cli" {
@@ -362,7 +373,7 @@ func TestExecActionResolveConfig_InvalidCLIQualityWarnsAndFallsThrough(t *testin
 		writeFile(t, filepath.Join(root, paths.DataDir, "config.toml"), "")
 		writeFile(t, filepath.Join(root, paths.DataDir, "local.toml"), "[executePrefs]\nquality = \"minimal\"\n")
 
-		out, err := execActionResolveConfig(root, ExecuteStateIn{Quality: "turbo-bogus"})
+		out, err := execActionResolveConfig(root, root, ExecuteStateIn{Quality: "turbo-bogus"})
 		if err != nil {
 			t.Fatalf("execActionResolveConfig: %v", err)
 		}
@@ -381,7 +392,7 @@ func TestExecActionResolveConfig_InvalidCLIQualityWarnsAndFallsThrough(t *testin
 		writeFile(t, filepath.Join(root, paths.DataDir, "config.toml"), "")
 		writeFile(t, filepath.Join(root, paths.DataDir, "local.toml"), "")
 
-		out, err := execActionResolveConfig(root, ExecuteStateIn{Quality: "turbo-bogus", Auto: true})
+		out, err := execActionResolveConfig(root, root, ExecuteStateIn{Quality: "turbo-bogus", Auto: true})
 		if err != nil {
 			t.Fatalf("execActionResolveConfig: %v", err)
 		}
@@ -400,7 +411,7 @@ func TestExecActionResolveConfig_InvalidCLIQualityWarnsAndFallsThrough(t *testin
 		writeFile(t, filepath.Join(root, paths.DataDir, "config.toml"), "")
 		writeFile(t, filepath.Join(root, paths.DataDir, "local.toml"), "")
 
-		out, err := execActionResolveConfig(root, ExecuteStateIn{Quality: "turbo-bogus"})
+		out, err := execActionResolveConfig(root, root, ExecuteStateIn{Quality: "turbo-bogus"})
 		if err != nil {
 			t.Fatalf("execActionResolveConfig: %v", err)
 		}
@@ -418,6 +429,7 @@ func TestExecActionResolveConfig_InvalidCLIQualityWarnsAndFallsThrough(t *testin
 // TestExecActionResolveConfig_NoBranchSkipsShipCrossRead tests that when
 // Branch is empty, ship state is not cross-read, even if it exists.
 func TestExecActionResolveConfig_NoBranchSkipsShipCrossRead(t *testing.T) {
+	stubVCS(t, gitInfo, nil, "main", nil, "main", "main")
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, paths.DataDir, "config.toml"), "")
 	writeFile(t, filepath.Join(root, paths.DataDir, "local.toml"), "")
@@ -430,7 +442,7 @@ func TestExecActionResolveConfig_NoBranchSkipsShipCrossRead(t *testing.T) {
 	})
 
 	// Call without Branch — ship state should not be consulted
-	out, err := execActionResolveConfig(root, ExecuteStateIn{
+	out, err := execActionResolveConfig(root, root, ExecuteStateIn{
 		Branch: "", // Empty branch
 	})
 	if err != nil {
@@ -456,11 +468,12 @@ func TestExecActionResolveConfig_NoBranchSkipsShipCrossRead(t *testing.T) {
 // "Moved personal settings" warning is reported, and config.toml no longer
 // has the key afterward.
 func TestExecActionResolveConfig_MigratesStaleHighRiskAutoApprove(t *testing.T) {
+	stubVCS(t, gitInfo, nil, "main", nil, "main", "main")
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, paths.DataDir, "config.toml"), "[execute]\nhighRiskAutoApprove = true\n")
 	writeFile(t, filepath.Join(root, paths.DataDir, "local.toml"), "")
 
-	out, err := execActionResolveConfig(root, ExecuteStateIn{})
+	out, err := execActionResolveConfig(root, root, ExecuteStateIn{})
 	if err != nil {
 		t.Fatalf("execActionResolveConfig: %v", err)
 	}
@@ -496,6 +509,7 @@ func TestExecActionResolveConfig_MigratesStaleHighRiskAutoApprove(t *testing.T) 
 // of picking a winner: a *mcpserver.DataError with a non-empty Suggestion,
 // and neither file is touched.
 func TestExecActionResolveConfig_ConflictingMoveReturnsDataError(t *testing.T) {
+	stubVCS(t, gitInfo, nil, "main", nil, "main", "main")
 	root := t.TempDir()
 	configPath := filepath.Join(root, paths.DataDir, "config.toml")
 	localPath := filepath.Join(root, paths.DataDir, "local.toml")
@@ -504,7 +518,7 @@ func TestExecActionResolveConfig_ConflictingMoveReturnsDataError(t *testing.T) {
 	writeFile(t, configPath, configBefore)
 	writeFile(t, localPath, localBefore)
 
-	out, err := execActionResolveConfig(root, ExecuteStateIn{})
+	out, err := execActionResolveConfig(root, root, ExecuteStateIn{})
 	if out != nil {
 		t.Errorf("out = %v, want nil on error", out)
 	}
@@ -536,11 +550,12 @@ func TestExecActionResolveConfig_ConflictingMoveReturnsDataError(t *testing.T) {
 // that commitWaves still resolves from config.toml [execute] even when
 // local [executePrefs] also exists and supplies other keys.
 func TestExecActionResolveConfig_CommitWavesFromConfigWithExecutePrefs(t *testing.T) {
+	stubVCS(t, gitInfo, nil, "main", nil, "main", "main")
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, paths.DataDir, "config.toml"), "[execute]\ncommitWaves = false\n")
 	writeFile(t, filepath.Join(root, paths.DataDir, "local.toml"), "[executePrefs]\nauto = true\n")
 
-	out, err := execActionResolveConfig(root, ExecuteStateIn{})
+	out, err := execActionResolveConfig(root, root, ExecuteStateIn{})
 	if err != nil {
 		t.Fatalf("execActionResolveConfig: %v", err)
 	}
@@ -563,11 +578,12 @@ func TestExecActionResolveConfig_CommitWavesFromConfigWithExecutePrefs(t *testin
 // branch that TestExecActionResolveConfig_WrongTypeWarns does not cover
 // (that one exercises highRiskAutoApprove).
 func TestExecActionResolveConfig_MalformedExecutePrefsWarns(t *testing.T) {
+	stubVCS(t, gitInfo, nil, "main", nil, "main", "main")
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, paths.DataDir, "config.toml"), "")
 	writeFile(t, filepath.Join(root, paths.DataDir, "local.toml"), "[executePrefs]\nquality = 123\n")
 
-	out, err := execActionResolveConfig(root, ExecuteStateIn{})
+	out, err := execActionResolveConfig(root, root, ExecuteStateIn{})
 	if err != nil {
 		t.Fatalf("execActionResolveConfig: %v", err)
 	}

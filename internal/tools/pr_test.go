@@ -15,6 +15,7 @@ import (
 	"github.com/rnagrodzki/sdlc-plugin/internal/configmigrate"
 	"github.com/rnagrodzki/sdlc-plugin/internal/execx"
 	"github.com/rnagrodzki/sdlc-plugin/internal/ghx"
+	"github.com/rnagrodzki/sdlc-plugin/internal/gitx"
 	"github.com/rnagrodzki/sdlc-plugin/internal/mcpserver"
 	"github.com/rnagrodzki/sdlc-plugin/internal/paths"
 	"github.com/rnagrodzki/sdlc-plugin/internal/prtemplate"
@@ -68,6 +69,8 @@ func constVersionDetect(ver string) func(root, path, fileType string) (*version.
 // PR-create output).
 func releaseTestRuntime(fileVersion string) prRuntime {
 	return prRuntime{
+		// Idle git-mode default: no jj path runs unless a test overrides it.
+		vcsDetect:        gitModeVCS,
 		configRead:       func(root string) (*config.Config, error) { return nil, nil },
 		versionDetect:    constVersionDetect(fileVersion),
 		gitFetchTags:     func(dir string) error { return nil },
@@ -244,6 +247,8 @@ func TestStripAttribution(t *testing.T) {
 
 func TestPrPrepare_ConfigNeedsMigration_ShortCircuits(t *testing.T) {
 	rt := prRuntime{
+		// Idle git-mode default: no jj path runs unless a test overrides it.
+		vcsDetect: gitModeVCS,
 		configMigrateVerify: func(root string) error {
 			return errors.New("config schemaVersion 1 is stale (needs migration)")
 		},
@@ -269,6 +274,8 @@ func TestPrPrepare_ConfigNeedsMigration_ShortCircuits(t *testing.T) {
 
 func TestPrPrepare_ConfigMoveKeysFails_ShortCircuits(t *testing.T) {
 	rt := prRuntime{
+		// Idle git-mode default: no jj path runs unless a test overrides it.
+		vcsDetect:           gitModeVCS,
 		configMigrateVerify: func(root string) error { return nil },
 		configMoveKeys: func(root string) ([]string, error) {
 			return nil, &configmigrate.MovedKeysErr{
@@ -302,6 +309,8 @@ func TestPrPrepare_ConfigMoveKeysFails_ShortCircuits(t *testing.T) {
 
 func TestPrPrepare_ConfigMoveKeysMoved_WarnsAndContinues(t *testing.T) {
 	rt := prRuntime{
+		// Idle git-mode default: no jj path runs unless a test overrides it.
+		vcsDetect:           gitModeVCS,
 		configMigrateVerify: func(root string) error { return nil },
 		configMoveKeys: func(root string) ([]string, error) {
 			return []string{"pr.expectedAccount -> [github] expectedAccount"}, nil
@@ -390,6 +399,8 @@ func TestPrPrepare_EarlyAuthExits_KeepWarnings(t *testing.T) {
 // [github] section read and origin remote are supplied by the caller.
 func expectedAccountRuntime(readSection func(root, section string) (map[string]any, error), originURL string) prRuntime {
 	return prRuntime{
+		// Idle git-mode default: no jj path runs unless a test overrides it.
+		vcsDetect: gitModeVCS,
 		ghAuthProbe: func(dir, host string) ghx.AuthProbeResult {
 			return ghx.AuthProbeResult{Authenticated: true, ActiveAccount: "someone"}
 		},
@@ -570,6 +581,8 @@ func TestPrPrepare_GithubSectionNotFound_NoUnreadableWarning(t *testing.T) {
 func TestPrPrepare_BrokenAuth_EmbedsLoginDiagnostics(t *testing.T) {
 	// gh api user (the AuthProbe command) fails — simulates "not logged in".
 	rt := prRuntime{
+		// Idle git-mode default: no jj path runs unless a test overrides it.
+		vcsDetect: gitModeVCS,
 		ghAuthProbe: func(dir, host string) ghx.AuthProbeResult {
 			return ghx.AuthProbeResult{
 				Authenticated: false,
@@ -609,6 +622,8 @@ func TestPrPrepare_AccountMismatch_EmbedsAccountDiagnostics(t *testing.T) {
 	// below only answers for section=="github", proving expectedAccount is
 	// read from [github], not the old [pr] section.
 	rt := prRuntime{
+		// Idle git-mode default: no jj path runs unless a test overrides it.
+		vcsDetect: gitModeVCS,
 		ghAuthProbe: func(dir, host string) ghx.AuthProbeResult {
 			return ghx.AuthProbeResult{Authenticated: true, ActiveAccount: "wronguser"}
 		},
@@ -655,6 +670,8 @@ func TestPrPrepare_AccountMismatch_EmbedsAccountDiagnostics(t *testing.T) {
 
 func TestPrPrepare_BranchGuardMismatch_HardGate(t *testing.T) {
 	rt := prRuntime{
+		// Idle git-mode default: no jj path runs unless a test overrides it.
+		vcsDetect: gitModeVCS,
 		ghAuthProbe: func(dir, host string) ghx.AuthProbeResult {
 			return ghx.AuthProbeResult{Authenticated: true, ActiveAccount: "someone"}
 		},
@@ -690,6 +707,8 @@ func TestPrPrepare_BranchGuardMismatch_HardGate(t *testing.T) {
 
 func TestPrPrepare_HappyPath_JiraAndTemplate(t *testing.T) {
 	rt := prRuntime{
+		// Idle git-mode default: no jj path runs unless a test overrides it.
+		vcsDetect: gitModeVCS,
 		ghAuthProbe: func(dir, host string) ghx.AuthProbeResult {
 			return ghx.AuthProbeResult{Authenticated: true, ActiveAccount: "someone"}
 		},
@@ -746,6 +765,8 @@ func TestPrPrepare_HappyPath_JiraAndTemplate(t *testing.T) {
 
 func TestPrPrepare_ProtectedBranch_Rejected(t *testing.T) {
 	rt := prRuntime{
+		// Idle git-mode default: no jj path runs unless a test overrides it.
+		vcsDetect: gitModeVCS,
 		ghAuthProbe: func(dir, host string) ghx.AuthProbeResult {
 			return ghx.AuthProbeResult{Authenticated: true, ActiveAccount: "someone"}
 		},
@@ -779,6 +800,8 @@ func TestPrPrepare_ProtectedBranch_Rejected(t *testing.T) {
 
 func TestPrPrepare_IncludesVersionDiagnostics(t *testing.T) {
 	rt := prRuntime{
+		// Idle git-mode default: no jj path runs unless a test overrides it.
+		vcsDetect: gitModeVCS,
 		ghAuthProbe: func(dir, host string) ghx.AuthProbeResult {
 			return ghx.AuthProbeResult{Authenticated: true, ActiveAccount: "someone"}
 		},
@@ -888,6 +911,8 @@ func TestPrPrepare_IncludesVersionDiagnostics(t *testing.T) {
 
 func TestPrPrepare_CommitsSinceBase_Populated(t *testing.T) {
 	rt := prRuntime{
+		// Idle git-mode default: no jj path runs unless a test overrides it.
+		vcsDetect: gitModeVCS,
 		ghAuthProbe: func(dir, host string) ghx.AuthProbeResult {
 			return ghx.AuthProbeResult{Authenticated: true, ActiveAccount: "someone"}
 		},
@@ -934,6 +959,8 @@ func TestPrPrepare_CommitsSinceBase_Populated(t *testing.T) {
 
 func TestPrPrepare_NoVersionConfig_OmitsVersionFields(t *testing.T) {
 	rt := prRuntime{
+		// Idle git-mode default: no jj path runs unless a test overrides it.
+		vcsDetect: gitModeVCS,
 		ghAuthProbe: func(dir, host string) ghx.AuthProbeResult {
 			return ghx.AuthProbeResult{Authenticated: true, ActiveAccount: "someone"}
 		},
@@ -1015,6 +1042,8 @@ func TestPrPrepare_BadVersionConfig_Warns(t *testing.T) {
 				writeFile(t, filepath.Join(root, paths.DataDir, "config.toml"), tc.config)
 			}
 			rt := prRuntime{
+				// Idle git-mode default: no jj path runs unless a test overrides it.
+				vcsDetect: gitModeVCS,
 				ghAuthProbe: func(dir, host string) ghx.AuthProbeResult {
 					return ghx.AuthProbeResult{Authenticated: true, ActiveAccount: "someone"}
 				},
@@ -1065,6 +1094,8 @@ func TestPrPrepare_BadVersionConfig_Warns(t *testing.T) {
 
 func TestPrPrepare_VersionDetectionFails_WarningNotError(t *testing.T) {
 	rt := prRuntime{
+		// Idle git-mode default: no jj path runs unless a test overrides it.
+		vcsDetect: gitModeVCS,
 		ghAuthProbe: func(dir, host string) ghx.AuthProbeResult {
 			return ghx.AuthProbeResult{Authenticated: true, ActiveAccount: "someone"}
 		},
@@ -1152,6 +1183,8 @@ func TestPrPrepare_VersionDetectionFails_WarningNotError(t *testing.T) {
 // with hasUpstream/commitsAhead as the only scenario-varying fields.
 func prepareNeedsPushRuntime(hasUpstream func(dir string) (bool, error), commitsAhead func(dir string) (int, error)) prRuntime {
 	return prRuntime{
+		// Idle git-mode default: no jj path runs unless a test overrides it.
+		vcsDetect: gitModeVCS,
 		ghAuthProbe: func(dir, host string) ghx.AuthProbeResult {
 			return ghx.AuthProbeResult{Authenticated: true, ActiveAccount: "someone"}
 		},
@@ -1259,6 +1292,8 @@ func TestPrPrepare_NeedsPush(t *testing.T) {
 
 func TestPrApply_NoExistingPR_Creates(t *testing.T) {
 	rt := prRuntime{
+		// Idle git-mode default: no jj path runs unless a test overrides it.
+		vcsDetect:     gitModeVCS,
 		ghPRForBranch: func(dir string) ghx.PRMetadata { return ghx.PRMetadata{Exists: false} },
 		ghPRCreate: func(dir, title, body string, _ prCreateOpts) (string, error) {
 			return "https://github.com/o/r/pull/9", nil
@@ -1375,6 +1410,8 @@ func TestPrBaseBranchConfig(t *testing.T) {
 		writeFile(t, filepath.Join(root, paths.DataDir, "config.toml"), "[git]\nbaseBranch = \"develop\"\n")
 
 		rt := prRuntime{
+			// Idle git-mode default: no jj path runs unless a test overrides it.
+			vcsDetect: gitModeVCS,
 			ghAuthProbe: func(dir, host string) ghx.AuthProbeResult {
 				return ghx.AuthProbeResult{Authenticated: true, ActiveAccount: "someone"}
 			},
@@ -1417,6 +1454,8 @@ func TestPrBaseBranchConfig(t *testing.T) {
 
 func TestPrApply_ExistingPR_Updates(t *testing.T) {
 	rt := prRuntime{
+		// Idle git-mode default: no jj path runs unless a test overrides it.
+		vcsDetect: gitModeVCS,
 		ghPRForBranch: func(dir string) ghx.PRMetadata {
 			return ghx.PRMetadata{Number: 9, Title: "old", URL: "https://github.com/o/r/pull/9", State: "OPEN", Exists: true}
 		},
@@ -1452,6 +1491,8 @@ func TestPrApply_ClosedOrMergedPR_CreatesNew(t *testing.T) {
 		t.Run(state, func(t *testing.T) {
 			edited := false
 			rt := prRuntime{
+				// Idle git-mode default: no jj path runs unless a test overrides it.
+				vcsDetect: gitModeVCS,
 				ghPRForBranch: func(dir string) ghx.PRMetadata {
 					return ghx.PRMetadata{Exists: true, State: state, Number: 9, URL: "https://github.com/o/r/pull/9"}
 				},
@@ -1518,6 +1559,8 @@ func TestPrApply_DraftAndBase_RealGHStub(t *testing.T) {
 			t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 			rt := prRuntime{
+				// Idle git-mode default: no jj path runs unless a test overrides it.
+				vcsDetect:          gitModeVCS,
 				ghPRForBranch:      func(dir string) ghx.PRMetadata { return ghx.PRMetadata{Exists: false} },
 				ghPRCreate:         defaultPRRuntime.ghPRCreate,
 				gitLogSinceTag:     func(dir string) ([]string, error) { return nil, nil },
@@ -1561,6 +1604,8 @@ func TestPrApply_DraftAndBase_RealGHStub(t *testing.T) {
 func TestPrApply_DraftAndBase_IgnoredOnUpdate(t *testing.T) {
 	edited := false
 	rt := prRuntime{
+		// Idle git-mode default: no jj path runs unless a test overrides it.
+		vcsDetect: gitModeVCS,
 		ghPRForBranch: func(dir string) ghx.PRMetadata {
 			return ghx.PRMetadata{Number: 9, URL: "https://github.com/o/r/pull/9", State: "OPEN", Exists: true}
 		},
@@ -1922,6 +1967,8 @@ func originRemoteExec(remoteURL string) func(name string, args []string, opts ex
 
 func TestPrApply_PermissionError_EnrichedWithAuthHints(t *testing.T) {
 	rt := prRuntime{
+		// Idle git-mode default: no jj path runs unless a test overrides it.
+		vcsDetect:     gitModeVCS,
 		ghPRForBranch: func(dir string) ghx.PRMetadata { return ghx.PRMetadata{Exists: false} },
 		ghPRCreate: func(dir, title, body string, _ prCreateOpts) (string, error) {
 			return "", errors.New("HTTP 403: Must be a collaborator to create pull requests")
@@ -1964,6 +2011,8 @@ func TestPrApply_PermissionError_EnrichedWithAuthHints(t *testing.T) {
 
 func TestPrApply_PermissionError_FromEdit_EnrichedSameWay(t *testing.T) {
 	rt := prRuntime{
+		// Idle git-mode default: no jj path runs unless a test overrides it.
+		vcsDetect: gitModeVCS,
 		ghPRForBranch: func(dir string) ghx.PRMetadata {
 			return ghx.PRMetadata{Exists: true, State: "OPEN", Number: 9, URL: "https://github.com/acme/widgets/pull/9"}
 		},
@@ -2001,6 +2050,8 @@ func TestPrApply_PermissionError_FromEdit_EnrichedSameWay(t *testing.T) {
 
 func TestPrApply_NonPermissionError_PassesThroughUnenriched(t *testing.T) {
 	rt := prRuntime{
+		// Idle git-mode default: no jj path runs unless a test overrides it.
+		vcsDetect:     gitModeVCS,
 		ghPRForBranch: func(dir string) ghx.PRMetadata { return ghx.PRMetadata{Exists: false} },
 		ghPRCreate: func(dir, title, body string, _ prCreateOpts) (string, error) {
 			return "", errors.New("connection reset by peer")
@@ -2034,6 +2085,8 @@ func TestPrApply_NonPermissionError_PassesThroughUnenriched(t *testing.T) {
 
 func TestPrApply_NonPermissionError_FromEdit_GenericSuggestion(t *testing.T) {
 	rt := prRuntime{
+		// Idle git-mode default: no jj path runs unless a test overrides it.
+		vcsDetect: gitModeVCS,
 		ghPRForBranch: func(dir string) ghx.PRMetadata {
 			return ghx.PRMetadata{Exists: true, State: "OPEN", Number: 9, URL: "https://github.com/acme/widgets/pull/9"}
 		},
@@ -2063,6 +2116,8 @@ func TestPrApply_NonPermissionError_FromEdit_GenericSuggestion(t *testing.T) {
 
 func TestPrApply_PermissionError_NoOriginRemote_FallsBackToGeneric(t *testing.T) {
 	rt := prRuntime{
+		// Idle git-mode default: no jj path runs unless a test overrides it.
+		vcsDetect:     gitModeVCS,
 		ghPRForBranch: func(dir string) ghx.PRMetadata { return ghx.PRMetadata{Exists: false} },
 		ghPRCreate: func(dir, title, body string, _ prCreateOpts) (string, error) {
 			return "", errors.New("HTTP 403: must be a collaborator")
@@ -2109,6 +2164,8 @@ func TestPrApply_PermissionError_NoOriginRemote_FallsBackToGeneric(t *testing.T)
 // subtests, which need prApplyCoreWith to run to completion.
 func fakeReleasePRRuntime() prRuntime {
 	return prRuntime{
+		// Idle git-mode default: no jj path runs unless a test overrides it.
+		vcsDetect:  gitModeVCS,
 		configRead: func(root string) (*config.Config, error) { return nil, nil },
 		versionDetect: func(root, path, fileType string) (*version.VersionFile, error) {
 			return &version.VersionFile{Version: "1.0.0"}, nil
@@ -2517,6 +2574,8 @@ func TestPRApply_WithoutRelease_Unchanged(t *testing.T) {
 	// No releaseLevel: intent stays nil, so prReleaseApplyLabelWith (and thus
 	// execRun) must never be invoked — the mock fails the test if it is.
 	rt := prRuntime{
+		// Idle git-mode default: no jj path runs unless a test overrides it.
+		vcsDetect:     gitModeVCS,
 		ghPRForBranch: func(dir string) ghx.PRMetadata { return ghx.PRMetadata{Exists: false} },
 		ghPRCreate: func(dir, title, body string, _ prCreateOpts) (string, error) {
 			return "https://github.com/o/r/pull/13", nil
@@ -2704,6 +2763,8 @@ func TestEnsureReleaseLabels(t *testing.T) {
 	t.Run("no existing labels — creates all six", func(t *testing.T) {
 		var created []string
 		rt := prRuntime{
+			// Idle git-mode default: no jj path runs unless a test overrides it.
+			vcsDetect:   gitModeVCS,
 			ghLabelList: func(dir string) ([]string, error) { return nil, nil },
 			ghLabelCreate: func(dir, name, color, desc string) error {
 				created = append(created, name)
@@ -2736,6 +2797,8 @@ func TestEnsureReleaseLabels(t *testing.T) {
 			existing = append(existing, l.Name)
 		}
 		rt := prRuntime{
+			// Idle git-mode default: no jj path runs unless a test overrides it.
+			vcsDetect:   gitModeVCS,
 			ghLabelList: func(dir string) ([]string, error) { return existing, nil },
 			ghLabelCreate: func(dir, name, color, desc string) error {
 				t.Fatalf("ghLabelCreate should not be called for already-existing label %q", name)
@@ -2750,6 +2813,8 @@ func TestEnsureReleaseLabels(t *testing.T) {
 	t.Run("some labels exist — only missing ones created", func(t *testing.T) {
 		var created []string
 		rt := prRuntime{
+			// Idle git-mode default: no jj path runs unless a test overrides it.
+			vcsDetect: gitModeVCS,
 			ghLabelList: func(dir string) ([]string, error) {
 				return []string{"release:patch", "release:minor"}, nil
 			},
@@ -2774,6 +2839,8 @@ func TestEnsureReleaseLabels(t *testing.T) {
 	t.Run("ghLabelList failure — best-effort, no creates attempted, nil error", func(t *testing.T) {
 		called := false
 		rt := prRuntime{
+			// Idle git-mode default: no jj path runs unless a test overrides it.
+			vcsDetect:   gitModeVCS,
 			ghLabelList: func(dir string) ([]string, error) { return nil, errors.New("gh not authenticated") },
 			ghLabelCreate: func(dir, name, color, desc string) error {
 				called = true
@@ -2791,6 +2858,8 @@ func TestEnsureReleaseLabels(t *testing.T) {
 	t.Run("ghLabelCreate failure on one label — remaining labels still attempted", func(t *testing.T) {
 		var created []string
 		rt := prRuntime{
+			// Idle git-mode default: no jj path runs unless a test overrides it.
+			vcsDetect:   gitModeVCS,
 			ghLabelList: func(dir string) ([]string, error) { return nil, nil },
 			ghLabelCreate: func(dir, name, color, desc string) error {
 				created = append(created, name)
@@ -2895,6 +2964,8 @@ func TestPrPrepare_ReleaseMarkerTemplateConflict(t *testing.T) {
 	const tmplPath = "/mock/root/.sdlc-v2/pr-template.md"
 
 	rt := prRuntime{
+		// Idle git-mode default: no jj path runs unless a test overrides it.
+		vcsDetect: gitModeVCS,
 		ghAuthProbe: func(dir, host string) ghx.AuthProbeResult {
 			return ghx.AuthProbeResult{Authenticated: true, ActiveAccount: "someone"}
 		},
@@ -3260,4 +3331,241 @@ func TestPRApply_ReapplyChangedIntent_SingleReleaseLabel(t *testing.T) {
 	if out2.ReleaseIntent == nil || !slices.Equal(out2.ReleaseIntent.LabelsRemoved, []string{"release:patch-rc"}) {
 		t.Errorf("second apply LabelsRemoved: got %v, want [release:patch-rc]", out2.ReleaseIntent.LabelsRemoved)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// pr_apply — jj mode (Decision 10)
+// ---------------------------------------------------------------------------
+
+// gitModeVCS is the idle git-mode detector every test runtime uses unless a
+// test overrides vcsDetect.
+func gitModeVCS(dir string) (gitx.VCSInfo, error) {
+	return gitx.VCSInfo{Mode: gitx.ModeGit}, nil
+}
+
+// jjApplyRuntime builds a jj-mode runtime on top of releaseTestRuntime.
+// bookmark is what gitCurrentBranch returns; refs maps a ref to its sha
+// (a missing key means the ref does not exist). Every remote write and the
+// git upstream check fail the test, so a stop case proves nothing ran.
+func jjApplyRuntime(t *testing.T, bookmark string, refs map[string]string) prRuntime {
+	t.Helper()
+	rt := releaseTestRuntime("1.0.0")
+	rt.vcsDetect = func(dir string) (gitx.VCSInfo, error) {
+		return gitx.VCSInfo{Mode: gitx.ModeJJ, Root: dir, JJVersion: "0.46.0"}, nil
+	}
+	rt.gitCurrentBranch = func(dir string) (string, error) { return bookmark, nil }
+	rt.gitRefCommit = func(dir, ref string) (string, bool, error) {
+		sha, ok := refs[ref]
+		return sha, ok, nil
+	}
+	rt.gitHasUpstream = func(dir string) (bool, error) {
+		t.Fatal("gitHasUpstream must not run in jj mode")
+		return false, nil
+	}
+	rt.gitCommitsAhead = func(dir string) (int, error) {
+		t.Fatal("gitCommitsAhead must not run in jj mode")
+		return 0, nil
+	}
+	rt.gitPushSetUpstream = func(dir, remote string) error {
+		t.Fatal("gitPushSetUpstream must not run in jj mode")
+		return nil
+	}
+	rt.ghPRForBranch = func(dir string) ghx.PRMetadata {
+		t.Fatal("ghPRForBranch reads HEAD and must not run in jj mode")
+		return ghx.PRMetadata{}
+	}
+	rt.ghPRForBranchName = func(dir, branch string) ghx.PRMetadata {
+		if branch != bookmark {
+			t.Errorf("ghPRForBranchName branch: got %q, want %q", branch, bookmark)
+		}
+		return ghx.PRMetadata{Exists: false}
+	}
+	return rt
+}
+
+// failOnRemoteWrites makes the label and gh calls fail the test, for the
+// stop cases that must return before any remote write.
+func failOnRemoteWrites(t *testing.T, rt *prRuntime) {
+	t.Helper()
+	rt.ghLabelList = func(dir string) ([]string, error) {
+		t.Fatal("ghLabelList must not run before a jj stop")
+		return nil, nil
+	}
+	rt.ghLabelCreate = func(dir, name, color, desc string) error {
+		t.Fatal("ghLabelCreate must not run before a jj stop")
+		return nil
+	}
+	rt.ghPRForBranchName = func(dir, branch string) ghx.PRMetadata {
+		t.Fatal("ghPRForBranchName must not run before a jj stop")
+		return ghx.PRMetadata{}
+	}
+	rt.ghPRCreate = func(dir, title, body string, _ prCreateOpts) (string, error) {
+		t.Fatal("ghPRCreate must not run before a jj stop")
+		return "", nil
+	}
+	rt.ghPREdit = func(dir string, num int, title, body string) (string, error) {
+		t.Fatal("ghPREdit must not run before a jj stop")
+		return "", nil
+	}
+	rt.execRun = func(name string, args []string, opts execx.Options) (string, error) {
+		t.Fatalf("execRun must not run before a jj stop: %s %v", name, args)
+		return "", nil
+	}
+}
+
+func jjApplyIn() PRApplyIn {
+	return PRApplyIn{Title: "T", Body: "B", ReleaseLevel: "patch", ReleaseNotes: "notes", ReleaseSource: "user"}
+}
+
+func TestPrApply_JJMode(t *testing.T) {
+	const b = "feat/x"
+	local, remote := "refs/heads/"+b, "refs/remotes/origin/"+b
+
+	t.Run("case a: match creates the PR with the bookmark and no push", func(t *testing.T) {
+		rt := jjApplyRuntime(t, b, map[string]string{local: "a1b2", remote: "a1b2"})
+		rt.execRun = mockAddLabelExec("release:patch")
+		var gotHead string
+		rt.ghPRCreate = func(dir, title, body string, opts prCreateOpts) (string, error) {
+			gotHead = opts.Head
+			return "https://github.com/o/r/pull/7", nil
+		}
+		out, err := prApplyCoreWith("/mock/root", "/mock/work", jjApplyIn(), rt)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !out.Created || gotHead != b {
+			t.Fatalf("got Created=%v head=%q, want true %q", out.Created, gotHead, b)
+		}
+	})
+
+	t.Run("case a: match edits the open PR found by bookmark", func(t *testing.T) {
+		rt := jjApplyRuntime(t, b, map[string]string{local: "a1b2", remote: "a1b2"})
+		rt.execRun = mockAddLabelExec("release:patch")
+		rt.ghPRForBranchName = func(dir, branch string) ghx.PRMetadata {
+			if branch != b {
+				t.Errorf("branch: got %q", branch)
+			}
+			return ghx.PRMetadata{Exists: true, State: "OPEN", Number: 12, URL: "https://github.com/o/r/pull/12"}
+		}
+		rt.ghPRCreate = func(dir, title, body string, _ prCreateOpts) (string, error) {
+			t.Fatal("ghPRCreate must not run when an open PR exists")
+			return "", nil
+		}
+		var edited int
+		rt.ghPREdit = func(dir string, num int, title, body string) (string, error) {
+			edited = num
+			return "", nil
+		}
+		out, err := prApplyCoreWith("/mock/root", "/mock/work", jjApplyIn(), rt)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if out.Created || edited != 12 || out.URL != "https://github.com/o/r/pull/12" {
+			t.Fatalf("got %+v, edited=%d", out, edited)
+		}
+	})
+
+	pushSuggestion := "Push it with jj git push -b feat/x, then retry pr_apply."
+	domainCases := []struct {
+		name, bookmark string
+		refs           map[string]string
+		msg, sugg      string
+	}{
+		{"case b: no remote bookmark", b, map[string]string{local: "a1b2"},
+			"pr_apply: bookmark feat/x is not on origin", pushSuggestion},
+		{"case c: local ahead, behind or diverged", b, map[string]string{local: "a1b2", remote: "c3d4"},
+			"pr_apply: bookmark feat/x differs from origin/feat/x", pushSuggestion},
+		{"case d: no bookmark on @ or @-", "HEAD", nil,
+			"pr_apply: no bookmark on @ or @-",
+			"Create one with jj bookmark create <name> -r @-, push it with jj git push -b <name>, then retry."},
+	}
+	for _, tc := range domainCases {
+		t.Run(tc.name, func(t *testing.T) {
+			rt := jjApplyRuntime(t, tc.bookmark, tc.refs)
+			failOnRemoteWrites(t, &rt)
+			_, err := prApplyCoreWith("/mock/root", "/mock/work", jjApplyIn(), rt)
+			var de *mcpserver.DomainError
+			if !errors.As(err, &de) {
+				t.Fatalf("expected *mcpserver.DomainError, got %T: %v", err, err)
+			}
+			if de.Msg != tc.msg || de.Suggestion != tc.sugg {
+				t.Fatalf("got %q / %q", de.Msg, de.Suggestion)
+			}
+		})
+	}
+
+	t.Run("case e: bookmark lookup error passes through unchanged", func(t *testing.T) {
+		want := &mcpserver.DomainError{Msg: "gitx: change @ has 2 bookmarks: a, b", Suggestion: "keep one"}
+		rt := jjApplyRuntime(t, b, nil)
+		failOnRemoteWrites(t, &rt)
+		rt.gitCurrentBranch = func(dir string) (string, error) { return "", want }
+		_, err := prApplyCoreWith("/mock/root", "/mock/work", jjApplyIn(), rt)
+		if err != want {
+			t.Fatalf("got %v, want the lookup error unchanged", err)
+		}
+	})
+
+	t.Run("ref lookup error is an InfraError", func(t *testing.T) {
+		rt := jjApplyRuntime(t, b, nil)
+		failOnRemoteWrites(t, &rt)
+		boom := errors.New("boom")
+		rt.gitRefCommit = func(dir, ref string) (string, bool, error) {
+			if ref == remote {
+				return "", false, boom
+			}
+			return "a1b2", true, nil
+		}
+		_, err := prApplyCoreWith("/mock/root", "/mock/work", jjApplyIn(), rt)
+		var ie *mcpserver.InfraError
+		if !errors.As(err, &ie) {
+			t.Fatalf("expected *mcpserver.InfraError, got %T: %v", err, err)
+		}
+		if ie.Msg != "pr_apply: reading refs/remotes/origin/feat/x: boom" ||
+			ie.Suggestion != "Run git rev-parse refs/remotes/origin/feat/x in the repository root, fix the repository, then retry." ||
+			!errors.Is(err, boom) {
+			t.Fatalf("got %q / %q", ie.Msg, ie.Suggestion)
+		}
+	})
+
+	t.Run("local ref missing is an InfraError", func(t *testing.T) {
+		rt := jjApplyRuntime(t, b, map[string]string{remote: "a1b2"})
+		failOnRemoteWrites(t, &rt)
+		_, err := prApplyCoreWith("/mock/root", "/mock/work", jjApplyIn(), rt)
+		var ie *mcpserver.InfraError
+		if !errors.As(err, &ie) {
+			t.Fatalf("expected *mcpserver.InfraError, got %T: %v", err, err)
+		}
+		if ie.Msg != "pr_apply: bookmark feat/x has no git branch" || ie.Suggestion != "Run jj git export, then retry pr_apply." {
+			t.Fatalf("got %q / %q", ie.Msg, ie.Suggestion)
+		}
+	})
+
+	t.Run("detector error is returned unchanged", func(t *testing.T) {
+		want := errors.New("detector failed")
+		rt := jjApplyRuntime(t, b, nil)
+		failOnRemoteWrites(t, &rt)
+		rt.vcsDetect = func(dir string) (gitx.VCSInfo, error) { return gitx.VCSInfo{}, want }
+		_, err := prApplyCoreWith("/mock/root", "/mock/work", jjApplyIn(), rt)
+		if err != want {
+			t.Fatalf("got %v, want the detector error unchanged", err)
+		}
+	})
+
+	t.Run("git mode passes no head and reads HEAD's PR", func(t *testing.T) {
+		rt := releaseTestRuntime("1.0.0")
+		rt.execRun = mockAddLabelExec("release:patch")
+		rt.ghPRForBranchName = func(dir, branch string) ghx.PRMetadata {
+			t.Fatal("ghPRForBranchName must not run in git mode")
+			return ghx.PRMetadata{}
+		}
+		rt.ghPRCreate = func(dir, title, body string, opts prCreateOpts) (string, error) {
+			if opts.Head != "" {
+				t.Errorf("head: got %q, want empty in git mode", opts.Head)
+			}
+			return "https://github.com/o/r/pull/1", nil
+		}
+		if _, err := prApplyCoreWith("/mock/root", "/mock/work", jjApplyIn(), rt); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
 }

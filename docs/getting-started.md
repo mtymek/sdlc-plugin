@@ -14,6 +14,7 @@ install, see [`smoke-test.md`](smoke-test.md).
   status`). Required by `pr`, `ship`, `received-review`, `verify-pipeline`,
   and link validation — these shell out to `gh` directly. `openspec-save`
   also needs it, because it runs the `pr` skill.
+- **jj (optional)** — 0.46 or newer. Only colocated repositories work (`.jj/` and `.git/` side by side). Run `jj git init --colocate` in a jj-only repository. In jj mode the plugin does not commit, push, branch or rebase for you; each tool prints the jj command to run.
 - The [OpenSpec CLI](https://github.com/Fission-AI/OpenSpec)
   (`npm i -g @fission-ai/openspec`), only if you use OpenSpec: `plan` with
   **Create OpenSpec change**, `openspec-save`, and the OpenSpec steps of `ship`.
@@ -137,6 +138,8 @@ use the resolved value.
 
 Leave it unset (the default, `""`) and each of those skills falls back to the
 repository's own default branch instead.
+
+In a jj repository the same rule picks the base branch. Execute skips base sync and rebase there; run `jj git fetch` and `jj rebase -d <base>@origin` by hand.
 
 ### Linked worktrees
 

@@ -230,11 +230,17 @@ type prRuntime struct {
 	gitHasUpstream      func(dir string) (bool, error)
 	gitCommitsAhead     func(dir string) (int, error)
 	gitLogSinceTag      func(dir string) ([]string, error)
+	vcsDetect           func(dir string) (gitx.VCSInfo, error)
+	gitRefCommit        func(dir, ref string) (string, bool, error)
+	ghPRForBranchName   func(dir, branch string) ghx.PRMetadata
 }
 
 // defaultPRRuntime wires prRuntime to the real package-level implementations.
 var defaultPRRuntime = prRuntime{
 	ghPRForBranch:       ghx.PRForBranch,
+	ghPRForBranchName:   ghx.PRForBranchName,
+	vcsDetect:           gitx.DetectVCS,
+	gitRefCommit:        gitx.RefCommit,
 	ghPRCreate:          ghx.PRCreate,
 	ghPREdit:            ghx.PREdit,
 	ghLabelList:         ghx.LabelList,
@@ -1104,6 +1110,23 @@ func prApplyCoreWith(mainRoot, workDir string, in PRApplyIn, rt prRuntime) (PRAp
 		}
 	}
 
+	// jj mode (Decision 10): pr_apply never pushes. It checks that the
+	// bookmark is already on origin at the same commit, and stops before
+	// any remote write (labels, push, gh) when it is not. jj leaves HEAD
+	// detached, so the git upstream check below cannot run in jj mode.
+	info, vcsErr := rt.vcsDetect(workDir)
+	if vcsErr != nil {
+		return PRApplyOut{}, vcsErr
+	}
+	jjBookmark := ""
+	if info.Mode == gitx.ModeJJ {
+		b, err := prApplyJJCheck(rt, workDir)
+		if err != nil {
+			return PRApplyOut{}, err
+		}
+		jjBookmark = b
+	}
+
 	// Build release intent before creating/editing the PR. Intent only —
 	// the concrete version is computed at merge time by CI.
 	var intent *ReleaseIntentInfo
@@ -1128,32 +1151,34 @@ func prApplyCoreWith(mainRoot, workDir string, in PRApplyIn, rt prRuntime) (PRAp
 	// so a heavy pre-push hook isn't fired for no reason. Placed after
 	// release-intent building, so input errors surface before we touch the
 	// remote.
-	hasUpstream, upErr := rt.gitHasUpstream(workDir)
-	if upErr != nil {
-		return PRApplyOut{}, &mcpserver.InfraError{
-			Msg:        "checking upstream: " + upErr.Error(),
-			Cause:      upErr,
-			Suggestion: "Verify the repository and current branch are in a valid git state, then retry.",
-		}
-	}
-	needsPush := !hasUpstream
-	if hasUpstream {
-		ahead, aheadErr := rt.gitCommitsAhead(workDir)
-		if aheadErr != nil {
+	if jjBookmark == "" { // git mode: today's push block, unchanged
+		hasUpstream, upErr := rt.gitHasUpstream(workDir)
+		if upErr != nil {
 			return PRApplyOut{}, &mcpserver.InfraError{
-				Msg:        "checking commits ahead of upstream: " + aheadErr.Error(),
-				Cause:      aheadErr,
-				Suggestion: "Verify the branch's upstream is reachable, then retry.",
+				Msg:        "checking upstream: " + upErr.Error(),
+				Cause:      upErr,
+				Suggestion: "Verify the repository and current branch are in a valid git state, then retry.",
 			}
 		}
-		needsPush = ahead > 0
-	}
-	if needsPush {
-		if err := rt.gitPushSetUpstream(workDir, "origin"); err != nil {
-			return PRApplyOut{}, &mcpserver.InfraError{
-				Msg:        "git push: " + err.Error(),
-				Cause:      err,
-				Suggestion: "Push the current branch manually (git push -u origin HEAD), then retry pr_apply.",
+		needsPush := !hasUpstream
+		if hasUpstream {
+			ahead, aheadErr := rt.gitCommitsAhead(workDir)
+			if aheadErr != nil {
+				return PRApplyOut{}, &mcpserver.InfraError{
+					Msg:        "checking commits ahead of upstream: " + aheadErr.Error(),
+					Cause:      aheadErr,
+					Suggestion: "Verify the branch's upstream is reachable, then retry.",
+				}
+			}
+			needsPush = ahead > 0
+		}
+		if needsPush {
+			if err := rt.gitPushSetUpstream(workDir, "origin"); err != nil {
+				return PRApplyOut{}, &mcpserver.InfraError{
+					Msg:        "git push: " + err.Error(),
+					Cause:      err,
+					Suggestion: "Push the current branch manually (git push -u origin HEAD), then retry pr_apply.",
+				}
 			}
 		}
 	}
@@ -1162,7 +1187,13 @@ func prApplyCoreWith(mainRoot, workDir string, in PRApplyIn, rt prRuntime) (PRAp
 	// the branch's newest closed or merged PR, which an earlier run on a
 	// reused branch may have left behind; that case opens a new PR.
 	base := strings.TrimSpace(in.Base)
-	meta := rt.ghPRForBranch(workDir)
+	var meta ghx.PRMetadata
+	if jjBookmark != "" {
+		// jj leaves HEAD detached, so gh must get the bookmark by name.
+		meta = rt.ghPRForBranchName(workDir, jjBookmark)
+	} else {
+		meta = rt.ghPRForBranch(workDir) // git mode: unchanged
+	}
 	if meta.Exists && meta.State == "OPEN" {
 		// gh pr edit cannot turn a PR into a draft or change its base, so
 		// draft/base are create-only. Say so rather than drop them silently.
@@ -1211,7 +1242,7 @@ func prApplyCoreWith(mainRoot, workDir string, in PRApplyIn, rt prRuntime) (PRAp
 		}
 	}
 
-	url, err := rt.ghPRCreate(workDir, in.Title, body, prCreateOpts{Draft: in.Draft, Base: base})
+	url, err := rt.ghPRCreate(workDir, in.Title, body, prCreateOpts{Draft: in.Draft, Base: base, Head: jjBookmark})
 	if err != nil {
 		if enriched := prEnrichPermissionError(rt, workDir, "gh pr create", err); enriched != nil {
 			return PRApplyOut{}, enriched
@@ -1228,6 +1259,93 @@ func prApplyCoreWith(mainRoot, workDir string, in PRApplyIn, rt prRuntime) (PRAp
 		}
 	}
 	return PRApplyOut{URL: url, Created: true, ReleaseIntent: intent, Warnings: createWarnings, Next: prApplyNext(true, intent)}, nil
+}
+
+// jjPushState is the result of comparing a jj bookmark's git branch with
+// its origin copy.
+type jjPushState string
+
+const (
+	jjPushMatch    jjPushState = "match"     // both refs exist at the same commit
+	jjPushNoRemote jjPushState = "no-remote" // refs/remotes/origin/<b> is missing
+	jjPushDiffers  jjPushState = "differs"   // local is ahead of, behind or diverged from origin
+)
+
+// jjBookmarkPushState compares refs/heads/<b> with refs/remotes/origin/<b>.
+// A failed ref lookup is an InfraError; a missing local ref (jj has not
+// exported the bookmark yet) is an InfraError too. Shared with pr_prepare.
+func jjBookmarkPushState(rt prRuntime, dir, bookmark string) (jjPushState, error) {
+	localRef := "refs/heads/" + bookmark
+	remoteRef := "refs/remotes/origin/" + bookmark
+	localSHA, localOK, err := rt.gitRefCommit(dir, localRef)
+	if err != nil {
+		return "", jjRefLookupError(localRef, err)
+	}
+	if !localOK {
+		return "", &mcpserver.InfraError{
+			Msg:        fmt.Sprintf("pr_apply: bookmark %s has no git branch", bookmark),
+			Suggestion: "Run jj git export, then retry pr_apply.",
+		}
+	}
+	remoteSHA, remoteOK, err := rt.gitRefCommit(dir, remoteRef)
+	if err != nil {
+		return "", jjRefLookupError(remoteRef, err)
+	}
+	if !remoteOK {
+		return jjPushNoRemote, nil
+	}
+	if localSHA != remoteSHA {
+		return jjPushDiffers, nil
+	}
+	return jjPushMatch, nil
+}
+
+// jjRefLookupError wraps a failed ref lookup in the table's InfraError.
+func jjRefLookupError(ref string, err error) error {
+	return &mcpserver.InfraError{
+		Msg:        fmt.Sprintf("pr_apply: reading %s: %v", ref, err),
+		Cause:      err,
+		Suggestion: fmt.Sprintf("Run git rev-parse %s in the repository root, fix the repository, then retry.", ref),
+	}
+}
+
+// jjPushSuggestion is the push command shown when the bookmark is missing
+// on origin or differs from it.
+func jjPushSuggestion(bookmark string) string {
+	return fmt.Sprintf("Push it with jj git push -b %s, then retry pr_apply.", bookmark)
+}
+
+// prApplyJJCheck runs pr_apply's jj-mode checks (Decision 10 cases b-e) and
+// returns the bookmark when it is on origin at the same commit (case a).
+// It never writes: no push, no labels, no gh call.
+func prApplyJJCheck(rt prRuntime, workDir string) (string, error) {
+	bookmark, err := rt.gitCurrentBranch(workDir)
+	if err != nil {
+		return "", err // case e: the bookmark-lookup error passes through
+	}
+	if bookmark == "HEAD" {
+		return "", &mcpserver.DomainError{
+			Msg:        "pr_apply: no bookmark on @ or @-",
+			Suggestion: "Create one with jj bookmark create <name> -r @-, push it with jj git push -b <name>, then retry.",
+		}
+	}
+	state, err := jjBookmarkPushState(rt, workDir, bookmark)
+	if err != nil {
+		return "", err
+	}
+	switch state {
+	case jjPushNoRemote:
+		return "", &mcpserver.DomainError{
+			Msg:        fmt.Sprintf("pr_apply: bookmark %s is not on origin", bookmark),
+			Suggestion: jjPushSuggestion(bookmark),
+		}
+	case jjPushDiffers:
+		return "", &mcpserver.DomainError{
+			Msg:        fmt.Sprintf("pr_apply: bookmark %s differs from origin/%s", bookmark, bookmark),
+			Suggestion: jjPushSuggestion(bookmark),
+		}
+	}
+	return bookmark, nil
 }
 
 // prGHRetrySuggestion is the recovery hint for a gh pr create/edit failure
@@ -1725,6 +1843,7 @@ func RegisterPRTools(s *mcpserver.Server) {
 		"Creates a PR for the current branch, or edits the existing one, via gh pr create/gh pr edit (KD14 executor tool). Pushes the branch "+
 			"first when needed (no upstream, or upstream behind HEAD); skips the push when upstream is already caught up, to avoid firing "+
 			"heavy pre-push hooks unnecessarily. "+
+			"In a jj repository it never pushes: it compares the bookmark with origin/<bookmark> and stops with the jj git push command when they differ or the remote is missing. "+
 			"draft and base apply only when a new PR is created (gh pr create --draft / --base <branch>); when an open PR is "+
 			"updated instead, gh pr edit cannot change either one, so they are ignored and named in warnings. "+
 			"releaseLevel is required unless skipReleaseCheck is true — an empty releaseLevel without skipReleaseCheck is rejected so release "+
