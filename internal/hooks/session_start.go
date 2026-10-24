@@ -1249,19 +1249,7 @@ func vcsContextPhase() []string {
 	if err != nil {
 		msg := strings.TrimRight(err.Error(), ". ")
 		line := "VCS: error \u2014 " + msg + "."
-		var sugg string
-		var de *mcpserver.DomainError
-		var ie *mcpserver.InfraError
-		var dae *mcpserver.DataError
-		switch {
-		case errors.As(err, &de):
-			sugg = de.Suggestion
-		case errors.As(err, &ie):
-			sugg = ie.Suggestion
-		case errors.As(err, &dae):
-			sugg = dae.Suggestion
-		}
-		if sugg != "" {
+		if sugg := mcpserver.SuggestionOf(err); sugg != "" {
 			line += " " + sugg
 		}
 		return []string{line}

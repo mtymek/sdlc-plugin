@@ -71,6 +71,15 @@ func TestCurrentBranchJJFake(t *testing.T) {
 			t.Fatalf("got %v", err)
 		}
 	})
+	t.Run("flag-like bookmark", func(t *testing.T) {
+		fakeJJBookmarks(t, map[string]string{"@": "-x\n"})
+		_, err := CurrentBranch(jjRepoDir(t))
+		var de *mcpserver.DomainError
+		if !errors.As(err, &de) || !strings.Contains(de.Msg, `"-x" looks like a flag`) ||
+			de.Suggestion != "Rename it with jj bookmark rename -- -x <name>, then retry." {
+			t.Fatalf("got %v", err)
+		}
+	})
 }
 
 func TestCurrentBranchJJReal(t *testing.T) {

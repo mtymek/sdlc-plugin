@@ -57,6 +57,9 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           "$HOME/.local/bin/jj" --version
 
+      # SDLC_REQUIRE_JJ is CI-only on purpose. lefthook.yml's pre-push hook
+      # runs the same go test command without it, so on a machine without jj
+      # the jj tests skip locally and only CI requires them.
       - name: Test
         env:
           SDLC_REQUIRE_JJ: "1"

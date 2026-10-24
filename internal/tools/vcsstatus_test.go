@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/rnagrodzki/sdlc-plugin/internal/config"
 	"github.com/rnagrodzki/sdlc-plugin/internal/gitx"
 	"github.com/rnagrodzki/sdlc-plugin/internal/mcpserver"
 )
@@ -150,5 +151,83 @@ func TestVCSStatus_ParityDetectorError(t *testing.T) {
 	res := out.(ExecuteResolveConfigOut)
 	if !containsAny(res.Warnings, want.Error()) || res.Next != execNextUnknown || res.VCS.Mode != "unknown" {
 		t.Fatalf("resolve-config: %+v", res)
+	}
+}
+
+// stubVCSLookups replaces the default- and base-branch seams with ones that
+// can fail, and records the configured base value passed in.
+func stubVCSLookups(t *testing.T, def string, defErr error, base string, baseErr error, gotConfigured *string) {
+	t.Helper()
+	oldD, oldBase := vcsDefaultBranch, vcsBaseBranch
+	vcsDefaultBranch = func(string) (string, error) { return def, defErr }
+	vcsBaseBranch = func(_ string, configured string) (string, error) {
+		if gotConfigured != nil {
+			*gotConfigured = configured
+		}
+		return base, baseErr
+	}
+	t.Cleanup(func() { vcsDefaultBranch, vcsBaseBranch = oldD, oldBase })
+}
+
+func TestVCSStatus_BranchLookupErrors(t *testing.T) {
+	noDefault := errors.New("gitx: cannot auto-detect default branch")
+
+	t.Run("no default branch is not a match", func(t *testing.T) {
+		stubVCS(t, jjInfo, nil, "feat/x", nil, "", "")
+		stubVCSLookups(t, "", noDefault, "", noDefault, nil)
+		got, err := vcsStatus("/x", t.TempDir())
+		if err != nil || got.NeedsBookmark || got.Branch != "feat/x" {
+			t.Fatalf("got %+v, %v; want no error and needsBookmark false", got, err)
+		}
+	})
+
+	t.Run("invalid configured base is returned", func(t *testing.T) {
+		root := t.TempDir()
+		if err := config.WriteSection(root, "git", map[string]any{"baseBranch": "-bad"}); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+		bad := errors.New(`gitx: BaseBranch: ref "-bad" looks like a flag`)
+		var configured string
+		stubVCS(t, jjInfo, nil, "feat/x", nil, "", "")
+		stubVCSLookups(t, "main", nil, "", bad, &configured)
+		got, err := vcsStatus("/x", root)
+		if !errors.Is(err, bad) || got.Mode != "jj" || got.Branch != "feat/x" || configured != "-bad" {
+			t.Fatalf("got %+v, %v (configured %q); want the base error", got, err, configured)
+		}
+		out, rerr := execActionResolveConfig(root, root, ExecuteStateIn{CommitWaves: "false"})
+		if rerr != nil {
+			t.Fatal(rerr)
+		}
+		if res := out.(ExecuteResolveConfigOut); res.Next != execNextBookmarkFail || !containsAny(res.Warnings, "-bad") {
+			t.Fatalf("resolve-config: next=%q warnings=%v", res.Next, res.Warnings)
+		}
+	})
+
+	t.Run("configured base branch is matched", func(t *testing.T) {
+		root := t.TempDir()
+		if err := config.WriteSection(root, "git", map[string]any{"baseBranch": "develop"}); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+		var configured string
+		stubVCS(t, jjInfo, nil, "develop", nil, "", "")
+		stubVCSLookups(t, "main", nil, "develop", nil, &configured)
+		got, err := vcsStatus("/x", root)
+		if err != nil || !got.NeedsBookmark || configured != "develop" {
+			t.Fatalf("got %+v, %v (configured %q); want needsBookmark true", got, err, configured)
+		}
+	})
+}
+
+func TestVCSStatus_ResolveConfigWarningCarriesSuggestion(t *testing.T) {
+	typed := &mcpserver.DomainError{Msg: "gitx: /r is not colocated", Suggestion: "Run `jj git init --colocate` in the repository root."}
+	stubVCS(t, gitx.VCSInfo{}, typed, "", nil, "", "")
+	root := t.TempDir()
+	out, err := execActionResolveConfig(root, root, ExecuteStateIn{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := typed.Msg + " — " + typed.Suggestion
+	if res := out.(ExecuteResolveConfigOut); !containsAny(res.Warnings, want) {
+		t.Fatalf("warnings = %v, want %q", res.Warnings, want)
 	}
 }

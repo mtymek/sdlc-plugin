@@ -32,6 +32,33 @@ func TestJJWriteStop_DetectorErrorReturned(t *testing.T) {
 	}
 }
 
+func TestJJWriteStop_UnknownOpGetsFallback(t *testing.T) {
+	stubVCSDetect(t, func(string) (gitx.VCSInfo, error) { return gitx.VCSInfo{Mode: gitx.ModeJJ}, nil })
+	err := jjWriteStop("/x", jjWriteOp("future op"))
+	var de *mcpserver.DomainError
+	if !errors.As(err, &de) || de.Suggestion != jjStopFallback || de.Suggestion == "" {
+		t.Fatalf("want DomainError with the fallback suggestion, got %v", err)
+	}
+}
+
+// jjStopWant is the exact stop a call site must return for op.
+func jjStopWant(op jjWriteOp) (msg, suggestion string) {
+	return fmt.Sprintf("%s: this is a jj repository; the plugin does not write in jj mode yet", op), jjStopSuggestions[op]
+}
+
+// assertJJStop checks err is the exact jj stop for op.
+func assertJJStop(t *testing.T, err error, op jjWriteOp) {
+	t.Helper()
+	var de *mcpserver.DomainError
+	if !errors.As(err, &de) {
+		t.Fatalf("want DomainError, got %T %v", err, err)
+	}
+	msg, sugg := jjStopWant(op)
+	if de.Msg != msg || de.Suggestion != sugg {
+		t.Fatalf("stop = %q / %q, want %q / %q", de.Msg, de.Suggestion, msg, sugg)
+	}
+}
+
 func TestJJWriteStop_JJModeTable(t *testing.T) {
 	stubVCSDetect(t, func(string) (gitx.VCSInfo, error) { return gitx.VCSInfo{Mode: gitx.ModeJJ}, nil })
 	rows := []struct {

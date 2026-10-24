@@ -262,10 +262,7 @@ func TestOpenspecSave_JJModeStops(t *testing.T) {
 	root, planPath := saveFixture(t)
 	stubVCSDetect(t, func(string) (gitx.VCSInfo, error) { return gitx.VCSInfo{Mode: gitx.ModeJJ}, nil })
 	_, err := openspecSave(root, OpenspecSaveIn{PlanPath: planPath})
-	var de *mcpserver.DomainError
-	if !errors.As(err, &de) || !strings.Contains(de.Msg, "openspec_save") {
-		t.Fatalf("err = %v, want jj stop DomainError", err)
-	}
+	assertJJStop(t, err, jjOpOpenspecSave)
 	assertSaveUntouched(t, root, planPath, "main")
 }
 

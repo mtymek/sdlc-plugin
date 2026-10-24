@@ -67,6 +67,14 @@ func jjCurrentBookmark(root string) (string, error) {
 				Suggestion: "Rename it with jj bookmark rename HEAD <name>, then retry.",
 			}
 		}
+		// Callers pass the name to git and gh as an argument; a leading "-"
+		// would be read as a flag.
+		if err := validateRef(names[0], "jj bookmark"); err != nil {
+			return "", &mcpserver.DomainError{
+				Msg:        err.Error(),
+				Suggestion: fmt.Sprintf("Rename it with jj bookmark rename -- %s <name>, then retry.", names[0]),
+			}
+		}
 		return names[0], nil
 	}
 	return "HEAD", nil

@@ -27,12 +27,12 @@ When `commitWaves` is false in jj mode, `wave-commit` SHALL return the instructi
 - **THEN** `next.instruction` is the jj text
 
 ### Requirement: resolve-config VCS status
-The `resolve-config` action SHALL return `vcs` (`mode`, `jjVersion`, `branch`, `needsBookmark`) and `next`, and SHALL pick `next` from the first matching row.
+The `resolve-config` action SHALL return `vcs` (`mode`, `jjVersion`, `branch`, `needsBookmark`) and `next`, and SHALL pick `next` from the first matching row. A VCS error SHALL be added to `warnings` with its suggestion. A failed default-branch lookup (no default branch) SHALL not set `needsBookmark`.
 
 | Condition | next |
 |---|---|
 | detection failed | `Stop: the version-control check failed. …` |
-| jj, branch lookup failed | `jj mode: stop. The bookmark check failed. …` |
+| jj, branch lookup failed, or `[git] baseBranch` is set but invalid | `jj mode: stop. The bookmark check failed. …` |
 | git | `Continue Step 0 with the plan-argument gate.` |
 | jj, commitWaves true | `jj mode: stop. Wave commits do not run in jj repositories yet. …` |
 | jj, needsBookmark | `jj mode: stop. Create a feature bookmark with jj bookmark create <name> -r @, then re-run /execute.` |

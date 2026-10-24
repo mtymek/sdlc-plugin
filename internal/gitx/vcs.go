@@ -19,12 +19,20 @@ import (
 type VCSMode string
 
 const (
+	// ModeGit is a plain git repository, or a folder in no repository.
 	ModeGit VCSMode = "git"
-	ModeJJ  VCSMode = "jj"
-	// MinJJVersion is the oldest jj the plugin is tested with (Decision 11).
-	MinJJVersion = "0.46.0"
-	jjOutputCap  = 200 // characters of bad jj output shown in an error
+	// ModeJJ is a jj repository colocated with git (.jj and .git side by side).
+	ModeJJ VCSMode = "jj"
 )
+
+// MinJJVersion is the oldest jj the plugin accepts: CI pins this release and
+// runs the jj tests against it, so older releases are untested.
+const MinJJVersion = "0.46.0"
+
+// minJJShort is MinJJVersion without the patch part, for user-facing text.
+var minJJShort = strings.TrimSuffix(MinJJVersion, ".0")
+
+const jjOutputCap = 200 // characters of bad jj output shown in an error
 
 // VCSInfo is the result of DetectVCS.
 type VCSInfo struct {
@@ -139,7 +147,7 @@ func checkJJVersion(root string) (string, error) {
 		if errors.Is(err, exec.ErrNotFound) {
 			return "", &mcpserver.InfraError{
 				Msg:        fmt.Sprintf("gitx: %s is a jj repository, but jj is not on PATH", root),
-				Suggestion: "Install jj 0.46 or newer.",
+				Suggestion: fmt.Sprintf("Install jj %s or newer.", minJJShort),
 				Cause:      err,
 			}
 		}
@@ -158,9 +166,11 @@ func checkJJVersion(root string) (string, error) {
 		}
 		return "", &mcpserver.DataError{
 			Msg:        fmt.Sprintf("gitx: cannot read the jj version from %q", shown),
-			Suggestion: "Run jj --version; reinstall jj 0.46 or newer if it does not print a version.",
+			Suggestion: fmt.Sprintf("Run jj --version; reinstall jj %s or newer if it does not print a version.", minJJShort),
 		}
 	}
+	// The Atoi errors are ignored: jjVersionRe matches only digit runs, and
+	// MinJJVersion is a constant of three numbers.
 	got := [3]int{}
 	for i := range got {
 		got[i], _ = strconv.Atoi(m[i+1])
@@ -175,7 +185,7 @@ func checkJJVersion(root string) (string, error) {
 		if got[i] < want {
 			return "", &mcpserver.InfraError{
 				Msg:        fmt.Sprintf("gitx: jj %s is older than %s", version, MinJJVersion),
-				Suggestion: "Upgrade jj to 0.46 or newer.",
+				Suggestion: fmt.Sprintf("Upgrade jj to %s or newer.", minJJShort),
 			}
 		}
 	}

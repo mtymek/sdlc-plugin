@@ -10431,10 +10431,11 @@ func TestExecState_WaveCommit_JJStop(t *testing.T) {
 		"context": map[string]any{},
 	})
 	stubJJMode(t)
+	before := readExecState(t, root, "feat/test")
 	_, err := executeState(root, root, ExecuteStateIn{Action: "wave-commit", Branch: "feat/test", Wave: intPtr(1), Message: "msg"}, fixedClock(testNow))
-	var de *mcpserver.DomainError
-	if !errors.As(err, &de) {
-		t.Fatalf("want DomainError, got %v", err)
+	assertJJStop(t, err, jjOpWaveCommit)
+	if after := readExecState(t, root, "feat/test"); !reflect.DeepEqual(before, after) {
+		t.Errorf("state changed on a jj stop:\nbefore %v\nafter  %v", before, after)
 	}
 }
 
@@ -10481,15 +10482,34 @@ func TestExecManualCommitInstruction(t *testing.T) {
 
 func TestExecuteBaseSync_JJStop(t *testing.T) {
 	fx := newBaseSyncFixture(t, "")
-	stubJJMode(t)
-	_, err := fx.baseSync(t, 1)
-	var de *mcpserver.DomainError
-	if !errors.As(err, &de) {
-		t.Fatalf("want DomainError, got %v", err)
+	// A new commit on origin/main: a fetch or merge would move a ref.
+	fx.pushToOriginMain(t, "base.txt", "base\n")
+	head := gitOutTrim(t, fx.root, "rev-parse", "HEAD")
+	tracking := gitOutTrim(t, fx.root, "rev-parse", "refs/remotes/origin/main")
+	stateBefore, err := os.ReadFile(fx.statePath)
+	if err != nil {
+		t.Fatal(err)
 	}
+	stubJJMode(t)
+
+	_, err = fx.baseSync(t, 1)
+	assertJJStop(t, err, jjOpBaseSync)
 	_, err = fx.baseSyncResolve(t, 1, false)
-	if !errors.As(err, &de) {
-		t.Fatalf("resolve: want DomainError, got %v", err)
+	assertJJStop(t, err, jjOpBaseSyncResolve)
+	_, err = fx.baseSyncResolve(t, 1, true)
+	assertJJStop(t, err, jjOpBaseSyncResolve)
+
+	if got := gitOutTrim(t, fx.root, "rev-parse", "HEAD"); got != head {
+		t.Errorf("HEAD moved: %s -> %s", head, got)
+	}
+	if got := gitOutTrim(t, fx.root, "rev-parse", "refs/remotes/origin/main"); got != tracking {
+		t.Errorf("origin/main moved (a fetch ran): %s -> %s", tracking, got)
+	}
+	if _, err := os.Stat(filepath.Join(fx.root, ".git", "MERGE_HEAD")); !os.IsNotExist(err) {
+		t.Errorf("MERGE_HEAD exists: a merge started (%v)", err)
+	}
+	if stateAfter, _ := os.ReadFile(fx.statePath); string(stateAfter) != string(stateBefore) {
+		t.Errorf("state file changed on a jj stop")
 	}
 }
 

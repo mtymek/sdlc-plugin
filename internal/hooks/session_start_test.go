@@ -3036,6 +3036,27 @@ func TestVCSContextPhase(t *testing.T) {
 		})
 	})
 
+	errRows := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"infra error", &mcpserver.InfraError{Msg: "gitx: /r is a jj repository, but jj is not on PATH", Suggestion: "Install jj 0.46 or newer."},
+			"VCS: error — gitx: /r is a jj repository, but jj is not on PATH. Install jj 0.46 or newer."},
+		{"data error", &mcpserver.DataError{Msg: `gitx: cannot read the jj version from "x"`, Suggestion: "Run jj --version."},
+			`VCS: error — gitx: cannot read the jj version from "x". Run jj --version.`},
+		{"untyped error", errors.New("boom"), "VCS: error — boom."},
+		{"trailing period and space trimmed", errors.New("boom. "), "VCS: error — boom."},
+	}
+	for _, r := range errRows {
+		t.Run(r.name, func(t *testing.T) {
+			old := detectVCSFunc
+			defer func() { detectVCSFunc = old }()
+			detectVCSFunc = func(string) (gitx.VCSInfo, error) { return gitx.VCSInfo{}, r.err }
+			assertLines(t, vcsContextPhase(), []string{r.want})
+		})
+	}
+
 	t.Run("no repo", func(t *testing.T) {
 		old := detectVCSFunc
 		defer func() { detectVCSFunc = old }()

@@ -50,7 +50,7 @@ On option 1, follow [`entry-modes.md`](entry-modes.md)'s `--resume` handler. On 
 
 `read` returns a `DataError` when this branch has no ship state file — that is not a failure, it means no run: continue below as a fresh run. If `read` succeeds with no `resumeBriefing` (a stamped-terminal file, or nothing ever started), also continue below with no special handling.
 
-**3. Pre-`ship_prepare` branch setup.** First call `ship_state({action:"vcs-mode"})`. An error → print its message and suggestion, stop (no state written). `mode` jj → print the response's `next` verbatim and end the run before `ship_prepare`; no state is written. Git mode → continue below as written. If on the default branch and `--plan <path>` was given:
+**3. Pre-`ship_prepare` branch setup.** First call `ship_state({action:"vcs-mode"})`. Ship reads only `mode` and `next` from the result; it ignores the other fields (`branch`, `needsBookmark`, `jjVersion`). An error → print its message and suggestion, stop (no state written). `mode` jj → print the response's `next` verbatim and end the run before `ship_prepare`; no state is written. Git mode → continue below as written. The `--resume` handler in [`entry-modes.md`](entry-modes.md) runs the same gate first, so a resumed run is gated too. If on the default branch and `--plan <path>` was given:
   - Under `flags.auto`: `git checkout -b <name>` with a log line, no prompt.
   - Otherwise (interactive mode): AskUserQuestion before branch creation:
     > On the default branch ({branch}). A feature branch is needed.

@@ -997,7 +997,11 @@ type PRApplyOut struct {
 	// Warnings names inputs the call ignored, e.g. draft/base on the update
 	// path. Absent when nothing was ignored.
 	Warnings []string `json:"warnings,omitempty"`
-	Next     string   `json:"next"`
+	// HeadBranch is the jj bookmark used as the PR head (gh pr create
+	// --head, and the name the open-PR lookup used). Empty in git mode,
+	// where gh reads the head from the checked-out branch.
+	HeadBranch string `json:"headBranch,omitempty" jsonschema_description:"jj mode only: the bookmark used as the PR head and to find an open PR. Absent in git mode."`
+	Next       string `json:"next"`
 }
 
 // prCreateOpts carries the gh pr create flags beyond title and body.
@@ -1265,7 +1269,7 @@ func prApplyCoreWith(mainRoot, workDir string, in PRApplyIn, rt prRuntime) (PRAp
 				return PRApplyOut{}, err
 			}
 		}
-		return PRApplyOut{URL: url, Created: false, ReleaseIntent: intent, Warnings: warnings, Next: prApplyNext(false, intent)}, nil
+		return PRApplyOut{URL: url, Created: false, ReleaseIntent: intent, Warnings: warnings, HeadBranch: jjBookmark, Next: prApplyNext(false, intent)}, nil
 	}
 
 	// A new PR always gets an explicit base: the caller's explicit input
@@ -1299,7 +1303,7 @@ func prApplyCoreWith(mainRoot, workDir string, in PRApplyIn, rt prRuntime) (PRAp
 			return PRApplyOut{}, err
 		}
 	}
-	return PRApplyOut{URL: url, Created: true, ReleaseIntent: intent, Warnings: createWarnings, Next: prApplyNext(true, intent)}, nil
+	return PRApplyOut{URL: url, Created: true, ReleaseIntent: intent, Warnings: createWarnings, HeadBranch: jjBookmark, Next: prApplyNext(true, intent)}, nil
 }
 
 // jjPushState is the result of comparing a jj bookmark's git branch with
@@ -1314,7 +1318,8 @@ const (
 
 // jjBookmarkPushState compares refs/heads/<b> with refs/remotes/origin/<b>.
 // A failed ref lookup is an InfraError; a missing local ref (jj has not
-// exported the bookmark yet) is an InfraError too. Shared with pr_prepare.
+// exported the bookmark yet) is an InfraError too. Shared with pr_prepare,
+// so its messages name no tool; the error renderer adds the tool name.
 func jjBookmarkPushState(rt prRuntime, dir, bookmark string) (jjPushState, error) {
 	localRef := "refs/heads/" + bookmark
 	remoteRef := "refs/remotes/origin/" + bookmark
@@ -1324,8 +1329,8 @@ func jjBookmarkPushState(rt prRuntime, dir, bookmark string) (jjPushState, error
 	}
 	if !localOK {
 		return "", &mcpserver.InfraError{
-			Msg:        fmt.Sprintf("pr_apply: bookmark %s has no git branch", bookmark),
-			Suggestion: "Run jj git export, then retry pr_apply.",
+			Msg:        fmt.Sprintf("bookmark %s has no git branch", bookmark),
+			Suggestion: "Run jj git export, then retry.",
 		}
 	}
 	remoteSHA, remoteOK, err := rt.gitRefCommit(dir, remoteRef)
@@ -1344,7 +1349,7 @@ func jjBookmarkPushState(rt prRuntime, dir, bookmark string) (jjPushState, error
 // jjRefLookupError wraps a failed ref lookup in the table's InfraError.
 func jjRefLookupError(ref string, err error) error {
 	return &mcpserver.InfraError{
-		Msg:        fmt.Sprintf("pr_apply: reading %s: %v", ref, err),
+		Msg:        fmt.Sprintf("reading %s: %v", ref, err),
 		Cause:      err,
 		Suggestion: fmt.Sprintf("Run git rev-parse %s in the repository root, fix the repository, then retry.", ref),
 	}
@@ -1884,7 +1889,7 @@ func RegisterPRTools(s *mcpserver.Server) {
 		"Creates a PR for the current branch, or edits the existing one, via gh pr create/gh pr edit (KD14 executor tool). Pushes the branch "+
 			"first when needed (no upstream, or upstream behind HEAD); skips the push when upstream is already caught up, to avoid firing "+
 			"heavy pre-push hooks unnecessarily. "+
-			"In a jj repository it never pushes: it compares the bookmark with origin/<bookmark> and stops with the jj git push command when they differ or the remote is missing. "+
+			"In a jj repository it never pushes: it compares the bookmark with origin/<bookmark> and stops with the jj git push command when they differ or the remote is missing; otherwise it uses the bookmark as the PR head and returns it as headBranch. "+
 			"draft and base apply only when a new PR is created (gh pr create --draft / --base <branch>); when an open PR is "+
 			"updated instead, gh pr edit cannot change either one, so they are ignored and named in warnings. "+
 			"releaseLevel is required unless skipReleaseCheck is true — an empty releaseLevel without skipReleaseCheck is rejected so release "+

@@ -42,6 +42,13 @@ type DataError struct {
 func (e *DataError) Error() string { return e.Msg }
 func (e *DataError) Unwrap() error { return e.Cause }
 
+// SuggestionOf returns the Suggestion of a DomainError, InfraError or
+// DataError in err's chain, or "" for any other error.
+func SuggestionOf(err error) string {
+	_, _, suggestion := mapError(err)
+	return suggestion
+}
+
 // mapError classifies an error into an error code, message, and recovery
 // suggestion. Wrapped errors are matched via errors.As. Unknown errors
 // default to "infra" with no suggestion.

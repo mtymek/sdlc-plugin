@@ -85,7 +85,7 @@ for release intent and for approval of the PR text.
   `openspec/<change>`.
 - Tracked files outside `openspec/changes/<change>/` and `.sdlc-v2/` have no
   changes. Commit or stash them first. Untracked files do not count.
-- Not a jj repository. In jj mode the tool stops. Save by hand: `jj bookmark create openspec/<change> -r @`, then `jj commit openspec/changes/<change> -m "<message>"`, then `jj git push -b openspec/<change>`.
+- Not a jj repository. In jj mode the tool stops, unless the plan already has the `**OpenSpec-Saved:**` line (then it returns the already-saved result as in git mode). Save by hand: `jj bookmark create openspec/<change> -r @`, then `jj commit openspec/changes/<change> -m "<message>"`, then `jj git push -b openspec/<change>`.
 
 ## Related skills
 

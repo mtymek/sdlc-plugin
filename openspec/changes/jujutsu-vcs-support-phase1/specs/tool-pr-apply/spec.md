@@ -30,6 +30,7 @@ The tool SHALL run `git push -u origin HEAD` when the branch has no upstream or 
 - **WHEN** `feat/x` and `origin/feat/x` point to the same commit
 - **THEN** no push runs
 - **THEN** the tool runs `gh pr view feat/x` and creates the PR with `--head feat/x`
+- **THEN** the result returns `headBranch: feat/x`
 
 #### Scenario: jj bookmark not pushed
 - **WHEN** the repository is in jj mode

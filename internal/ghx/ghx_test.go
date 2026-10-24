@@ -925,4 +925,9 @@ func TestPRCreate_Head(t *testing.T) {
 	if got := readArgs(t, rec); strings.Contains(got, "--head") {
 		t.Errorf("args = %q, want no --head", got)
 	}
+	for _, opts := range []PRCreateOpts{{Head: "-x"}, {Base: "-x"}} {
+		if _, err := PRCreate(".", "T", "B", opts); err == nil || !strings.Contains(err.Error(), "looks like a flag") {
+			t.Errorf("PRCreate(%+v) err = %v, want a flag-like rejection", opts, err)
+		}
+	}
 }

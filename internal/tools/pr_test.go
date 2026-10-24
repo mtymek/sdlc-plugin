@@ -1318,6 +1318,9 @@ func TestPrApply_NoExistingPR_Creates(t *testing.T) {
 	if out.URL != "https://github.com/o/r/pull/9" {
 		t.Errorf("URL: got %q", out.URL)
 	}
+	if out.HeadBranch != "" {
+		t.Errorf("HeadBranch: got %q, want empty in git mode", out.HeadBranch)
+	}
 	if !strings.Contains(out.Next, "PR created") {
 		t.Errorf("Next: got %q", out.Next)
 	}
@@ -3433,8 +3436,8 @@ func TestPrApply_JJMode(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if !out.Created || gotHead != b {
-			t.Fatalf("got Created=%v head=%q, want true %q", out.Created, gotHead, b)
+		if !out.Created || gotHead != b || out.HeadBranch != b {
+			t.Fatalf("got Created=%v head=%q headBranch=%q, want true %q", out.Created, gotHead, out.HeadBranch, b)
 		}
 	})
 
@@ -3460,7 +3463,7 @@ func TestPrApply_JJMode(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if out.Created || edited != 12 || out.URL != "https://github.com/o/r/pull/12" {
+		if out.Created || edited != 12 || out.URL != "https://github.com/o/r/pull/12" || out.HeadBranch != b {
 			t.Fatalf("got %+v, edited=%d", out, edited)
 		}
 	})
@@ -3520,7 +3523,7 @@ func TestPrApply_JJMode(t *testing.T) {
 		if !errors.As(err, &ie) {
 			t.Fatalf("expected *mcpserver.InfraError, got %T: %v", err, err)
 		}
-		if ie.Msg != "pr_apply: reading refs/remotes/origin/feat/x: boom" ||
+		if ie.Msg != "reading refs/remotes/origin/feat/x: boom" ||
 			ie.Suggestion != "Run git rev-parse refs/remotes/origin/feat/x in the repository root, fix the repository, then retry." ||
 			!errors.Is(err, boom) {
 			t.Fatalf("got %q / %q", ie.Msg, ie.Suggestion)
@@ -3535,7 +3538,7 @@ func TestPrApply_JJMode(t *testing.T) {
 		if !errors.As(err, &ie) {
 			t.Fatalf("expected *mcpserver.InfraError, got %T: %v", err, err)
 		}
-		if ie.Msg != "pr_apply: bookmark feat/x has no git branch" || ie.Suggestion != "Run jj git export, then retry pr_apply." {
+		if ie.Msg != "bookmark feat/x has no git branch" || ie.Suggestion != "Run jj git export, then retry." {
 			t.Fatalf("got %q / %q", ie.Msg, ie.Suggestion)
 		}
 	})

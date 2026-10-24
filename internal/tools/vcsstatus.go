@@ -2,6 +2,7 @@ package tools
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/rnagrodzki/sdlc-plugin/internal/config"
 	"github.com/rnagrodzki/sdlc-plugin/internal/gitx"
@@ -12,7 +13,7 @@ import (
 type VCSStatusOut struct {
 	Mode          string `json:"mode" jsonschema_description:"git, jj, or unknown when detection failed (see warnings)."`
 	JJVersion     string `json:"jjVersion,omitempty" jsonschema_description:"jj version in jj mode, e.g. 0.46.0."`
-	Branch        string `json:"branch" jsonschema_description:"Current branch or jj bookmark; HEAD when there is none."`
+	Branch        string `json:"branch" jsonschema_description:"Current branch or jj bookmark; HEAD when there is none; empty after a branch-lookup error (see warnings)."`
 	NeedsBookmark bool   `json:"needsBookmark" jsonschema_description:"jj mode only: true when the run must stop until the user creates a feature bookmark."`
 }
 
@@ -48,6 +49,12 @@ var (
 // error. A branch lookup error returns the mode, an empty branch and the
 // error. needsBookmark is true only in jj mode, when the branch is "HEAD",
 // the default branch or the base branch.
+//
+// A default-branch lookup error is not returned: gitx.DefaultBranch hides
+// git failures and errors only when the repository has no default branch,
+// so the bookmark cannot be on it. A base-branch error with [git] baseBranch
+// set means the configured value is invalid; it is returned with the mode
+// and branch, and the caller stops.
 func vcsStatus(dir, root string) (VCSStatusOut, error) {
 	info, err := vcsDetect(dir)
 	if err != nil {
@@ -69,7 +76,12 @@ func vcsStatus(dir, root string) (VCSStatusOut, error) {
 	if def, derr := vcsDefaultBranch(dir); derr == nil && branch == def {
 		out.NeedsBookmark = true
 	}
-	if base, berr := vcsBaseBranch(dir, config.GitBaseBranch(root)); berr == nil && branch == base {
+	configured := config.GitBaseBranch(root)
+	base, berr := vcsBaseBranch(dir, configured)
+	if berr != nil && strings.TrimSpace(configured) != "" {
+		return out, berr
+	}
+	if berr == nil && branch == base {
 		out.NeedsBookmark = true
 	}
 	return out, nil
