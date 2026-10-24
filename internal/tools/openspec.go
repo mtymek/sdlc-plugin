@@ -98,7 +98,8 @@ func RegisterOpenspecTools(s *mcpserver.Server) {
 			"Input: planPath, the absolute path of the plan file with an **OpenSpec-Staging:** header line. "+
 			"Output: change, branch, branchCreated, materialized (created | already), refsStamped, stagedFiles, warnings (for example a change with no tasks.md), summary, next. "+
 			"Side effects: on the default branch it creates and switches to the branch openspec/<change> (git switch -c); it moves the staged files into openspec/changes/<change>/ through the OpenSpec CLI; it writes a ref comment into each task line of openspec/changes/<change>/tasks.md; it runs git add on openspec/changes/<change>/; it rewrites the plan's **OpenSpec-Staging:** header line to **OpenSpec-Saved:** openspec/changes/<change>/ (branch openspec/<change>). It does not commit. "+
-			"A plan that already has the **OpenSpec-Saved:** line returns materialized \"already\": the tool checks that the current branch is the saved branch and that openspec/changes/<change>/ exists (each failed check is an error), then runs git add on openspec/changes/<change>/ again. It does not change the plan file.",
+			"A plan that already has the **OpenSpec-Saved:** line returns materialized \"already\": the tool checks that the current branch is the saved branch and that openspec/changes/<change>/ exists (each failed check is an error), then runs git add on openspec/changes/<change>/ again. It does not change the plan file. "+
+			"In a jj repository it stops with a DomainError before any write; the suggestion gives the jj commands.",
 		mcpserver.Annotations{
 			Title:       "Save OpenSpec change to branch",
 			ReadOnly:    false,

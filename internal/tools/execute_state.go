@@ -565,9 +565,9 @@ Pass "action" to select an operation. Each action uses a subset of the input fie
 - wave-done: Complete a wave. Returns narration (summary, display with outcomes, timing, next wave preview + ETA). Records wave duration to TimingsStore. Requires wave. Optional: branch, decisions, status ("completed" default, or "partial"), timedOut (stamps timedOut:true on the wave), detail ("concise"|"full").
 - wave-fail: Fail a wave. Returns narration (summary, display with failure cause). Requires wave. Optional: branch, timedOut, error (failure cause, recorded as an issue and in failedWave), detail ("concise"|"full").
 - wave-committed: Record a commit SHA for a completed wave. Requires wave. Optional: branch, sha.
-- wave-commit: Stage and commit a completed wave's changes (git add -A + git commit -m message) and record the resulting sha on the wave, mirroring wave-committed's SHA-recording. Requires wave, message. Optional: branch, detail ("concise"|"full"). The wave must already be "completed" (call wave-done first). Empty diff: succeeds without committing ({committed:false, reason:"nothing to commit"}). When config execute.commitWaves is false, does not commit and instead returns an instruction to commit manually and call wave-committed. Idempotent on resume: an already-recorded committedSha that is still an ancestor of HEAD is reported ({idempotent:true}) rather than committed again.
-- base-sync: Fetch origin/<base> and merge it into the current branch between waves (base = [git] baseBranch, else the default branch). Requires wave. Optional: branch. Returns status (disabled|skipped|up-to-date|merged|conflict), base, behind, sha, conflictedFiles, warnings, and appends one baseSyncs[] entry. A dirty tree or a failed fetch returns skipped without merging; a merge already in progress returns DomainError. On conflict the merge stays in progress; call base-sync-resolve next.
-- base-sync-resolve: Finish or abort the merge left by a base-sync conflict. Requires wave. Optional: branch, abort. Without abort: fails with DomainError when no merge is in progress, or while unmerged files or conflict markers remain in the recorded conflictedFiles, else runs git add + git commit --no-edit and returns status resolved with sha. With abort:true: runs git merge --abort and returns status aborted; a no-op with a warning when no merge is in progress. Updates the wave's last baseSyncs[] entry.
+- wave-commit: Stage and commit a completed wave's changes (git add -A + git commit -m message) and record the resulting sha on the wave, mirroring wave-committed's SHA-recording. Requires wave, message. Optional: branch, detail ("concise"|"full"). The wave must already be "completed" (call wave-done first). Empty diff: succeeds without committing ({committed:false, reason:"nothing to commit"}). When config execute.commitWaves is false, does not commit and instead returns an instruction to commit manually and call wave-committed. Idempotent on resume: an already-recorded committedSha that is still an ancestor of HEAD is reported ({idempotent:true}) rather than committed again. In a jj repository it stops with a DomainError before any write.
+- base-sync: Fetch origin/<base> and merge it into the current branch between waves (base = [git] baseBranch, else the default branch). Requires wave. Optional: branch. Returns status (disabled|skipped|up-to-date|merged|conflict), base, behind, sha, conflictedFiles, warnings, and appends one baseSyncs[] entry. A dirty tree or a failed fetch returns skipped without merging; a merge already in progress returns DomainError. On conflict the merge stays in progress; call base-sync-resolve next. In a jj repository it stops with a DomainError before any write.
+- base-sync-resolve: Finish or abort the merge left by a base-sync conflict. Requires wave. Optional: branch, abort. Without abort: fails with DomainError when no merge is in progress, or while unmerged files or conflict markers remain in the recorded conflictedFiles, else runs git add + git commit --no-edit and returns status resolved with sha. With abort:true: runs git merge --abort and returns status aborted; a no-op with a warning when no merge is in progress. Updates the wave's last baseSyncs[] entry. In a jj repository it stops with a DomainError before any write.
 - task-done: Record task completion. Returns narration (summary with running tally, warnings[] when phantom-success heuristics fire). Requires wave, taskId. Optional: branch, taskName, complexity, risk, filesChanged, filesAdded, verifyToken, status ("DONE_WITH_CONCERNS" records a warning issue), error (concern detail for DONE_WITH_CONCERNS). A taskId that is not in a non-empty plannedTaskIds is still recorded, with a warning that names it.
 - task-fail: Record task failure. Returns narration (summary with running tally). Requires wave, taskId. Optional: branch, runId (locates the worker's progress file to harvest a resumeFrom claim; falls back the same way wave-start does), taskName, complexity, risk, error, skippedDependency (records an issue; only a non-skipped failure updates failedTask). Idempotent: a repeat call for a task already recorded as failed/skipped at the same attempt is a no-op — it does not duplicate the issue log or move completedAt forward.
 - task-redispatch: Reopen a failed task for another attempt. Requires taskId. Optional: branch, runId, wave (searches every wave for the task's closed row when omitted). Re-opens the task's wave-manifest row to "in_progress", then deletes and re-seeds the task's server state with a fresh dispatchedAt and attempt+1 — contextFetchedAt, reclaimRequestedAt, and batchId all come back empty, since a redispatch is always solo even if the failed attempt was batched. Refuses with a DomainError (Suggestion names user escalation) at the 2-retry ceiling (attempt already at 3) instead of seeding a 4th attempt.
@@ -3353,9 +3353,13 @@ func execActionWaveCommit(root, workDir string, in ExecuteStateIn) (any, error) 
 		}
 		result.Next = &pipeline.NextAction{
 			ID:          fmt.Sprintf("wave-%d-manual-commit", *in.Wave),
-			Instruction: fmt.Sprintf("execute.commitWaves is false: commit wave %d manually (git add -A && git commit -m \"...\"), then call wave-committed with the resulting sha before wave-start for wave %d.", *in.Wave, nextWave),
+			Instruction: execManualCommitInstruction(workDir, *in.Wave, nextWave),
 		}
 		return result, nil
+	}
+
+	if err := jjWriteStop(workDir, jjOpWaveCommit); err != nil {
+		return nil, err
 	}
 
 	if _, err := execx.Run("git", []string{"add", "-A"}, execx.Options{Dir: workDir}); err != nil {
@@ -3410,6 +3414,21 @@ func execActionWaveCommit(root, workDir string, in ExecuteStateIn) (any, error) 
 // verbatim from the tool-execute-state spec.
 const execBaseSyncConflictNext = "Resolve the conflicts in conflictedFiles, then call base-sync-resolve. Call base-sync-resolve with abort:true if they cannot be resolved."
 
+// execManualCommitInstruction returns the commitWaves=false instruction for
+// the repository mode. jj mode makes no commit; a detector error keeps the
+// git text and appends the error.
+func execManualCommitInstruction(workDir string, wave, nextWave int) string {
+	gitText := fmt.Sprintf("execute.commitWaves is false: commit wave %d manually (git add -A && git commit -m \"...\"), then call wave-committed with the resulting sha before wave-start for wave %d.", wave, nextWave)
+	info, err := vcsDetect(workDir)
+	if err != nil {
+		return gitText + fmt.Sprintf(" (version-control check failed: %s)", err.Error())
+	}
+	if info.Mode == gitx.ModeJJ {
+		return fmt.Sprintf("jj mode: do not commit. Leave wave %d's changes in the working-copy change @, then call wave-committed for wave %d with no sha before wave-start for wave %d.", wave, wave, nextWave)
+	}
+	return gitText
+}
+
 // execBaseSyncEnabled reads config [execute] baseSync (default true).
 func execBaseSyncEnabled(root string) bool {
 	return execBoolConfigEnabled(root, "baseSync")
@@ -3460,6 +3479,10 @@ func execActionBaseSync(root, workDir string, in ExecuteStateIn, now func() time
 	if !execBaseSyncEnabled(root) {
 		result.Status = "disabled"
 		return execBaseSyncFinish(st, wave, result, now)
+	}
+
+	if err := jjWriteStop(workDir, jjOpBaseSync); err != nil {
+		return nil, err
 	}
 
 	inProgress, err := gitx.MergeInProgress(workDir)
@@ -3672,6 +3695,10 @@ func execActionBaseSyncResolve(root, workDir string, in ExecuteStateIn) (any, er
 		return nil, err
 	}
 	if err := execAssertBranch(st, branch); err != nil {
+		return nil, err
+	}
+
+	if err := jjWriteStop(workDir, jjOpBaseSyncResolve); err != nil {
 		return nil, err
 	}
 

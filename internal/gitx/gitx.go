@@ -356,6 +356,30 @@ func TagExists(dir, name string) (bool, error) {
 	return err == nil, nil
 }
 
+// RefCommit resolves ref with git rev-parse --verify --quiet <ref>^{commit}.
+// Exit 1 means the ref does not exist and yields ("", false, nil); any other
+// failure is returned as an error.
+func RefCommit(dir, ref string) (sha string, exists bool, err error) {
+	if ref == "" {
+		return "", false, fmt.Errorf("gitx: ref commit: ref is empty")
+	}
+	if err := validateRef(ref, "ref commit"); err != nil {
+		return "", false, err
+	}
+	out, stderr, code, runErr := execx.RunAllowExit("git", []string{"rev-parse", "--verify", "--quiet", ref + "^{commit}"}, execx.Options{Dir: dir})
+	if runErr != nil {
+		return "", false, fmt.Errorf("gitx: ref commit %s: %w", ref, runErr)
+	}
+	switch code {
+	case 0:
+		return strings.TrimSpace(out), true, nil
+	case 1:
+		return "", false, nil
+	default:
+		return "", false, fmt.Errorf("gitx: ref commit %s: git exited %d: %s", ref, code, strings.TrimSpace(stderr))
+	}
+}
+
 // CreateTag creates an annotated tag (git tag -a) named name at HEAD with
 // message as its annotation. Returns an actionable error when name is
 // empty, name already exists (collision — checked before attempting

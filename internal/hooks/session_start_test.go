@@ -13,7 +13,10 @@ import (
 	"time"
 
 	"github.com/rnagrodzki/sdlc-plugin/internal/commstyle"
+	"github.com/rnagrodzki/sdlc-plugin/internal/gitx"
 	"github.com/rnagrodzki/sdlc-plugin/internal/history"
+	"github.com/rnagrodzki/sdlc-plugin/internal/jjtest"
+	"github.com/rnagrodzki/sdlc-plugin/internal/mcpserver"
 	"github.com/rnagrodzki/sdlc-plugin/internal/openspec"
 	"github.com/rnagrodzki/sdlc-plugin/internal/paths"
 	"github.com/rnagrodzki/sdlc-plugin/internal/state"
@@ -2992,4 +2995,53 @@ func mustWriteFile(t *testing.T, path, content string) {
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// VCS context phase
+// ---------------------------------------------------------------------------
+
+func TestVCSContextPhase(t *testing.T) {
+	t.Run("git", func(t *testing.T) {
+		gitFixture(t, "feat/vcs-git")
+		assertLines(t, vcsContextPhase(), []string{"VCS: git"})
+	})
+
+	t.Run("jj", func(t *testing.T) {
+		jjtest.Require(t)
+		root := jjtest.NewColocatedRepo(t)
+		chdir(t, root)
+		got := vcsContextPhase()
+		if len(got) != 1 || !strings.HasPrefix(got[0], "VCS: jj ") || !strings.HasSuffix(got[0], " (colocated)") {
+			t.Fatalf("got %q, want VCS: jj <version> (colocated)", got)
+		}
+		jjtest.Run(t, root, "bookmark", "rename", "main", "feat/vcs-jj")
+		git := gitContextPhase()
+		if len(git) != 1 || !strings.Contains(git[0], "feat/vcs-jj") {
+			t.Fatalf("Git line %q does not name the bookmark", git)
+		}
+	})
+
+	t.Run("error", func(t *testing.T) {
+		old := detectVCSFunc
+		defer func() { detectVCSFunc = old }()
+		detectVCSFunc = func(string) (gitx.VCSInfo, error) {
+			return gitx.VCSInfo{}, &mcpserver.DomainError{
+				Msg:        "gitx: /r is a jj repository that is not colocated with git",
+				Suggestion: "Run `jj git init --colocate` in the repository root.",
+			}
+		}
+		assertLines(t, vcsContextPhase(), []string{
+			"VCS: error — gitx: /r is a jj repository that is not colocated with git. Run `jj git init --colocate` in the repository root.",
+		})
+	})
+
+	t.Run("no repo", func(t *testing.T) {
+		old := detectVCSFunc
+		defer func() { detectVCSFunc = old }()
+		detectVCSFunc = func(string) (gitx.VCSInfo, error) {
+			return gitx.VCSInfo{Mode: gitx.ModeGit}, nil
+		}
+		assertLines(t, vcsContextPhase(), nil)
+	})
 }

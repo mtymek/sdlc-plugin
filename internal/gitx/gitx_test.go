@@ -1282,3 +1282,31 @@ func TestCommitsAhead_NotARepo(t *testing.T) {
 		t.Fatal("CommitsAhead outside repo: expected error, got nil")
 	}
 }
+
+func TestRefCommit(t *testing.T) {
+	dir := t.TempDir()
+	initGitRepo(t, dir)
+	want := gitRun(t, dir, "rev-parse", "HEAD")
+
+	sha, ok, err := RefCommit(dir, "main")
+	if err != nil || !ok || sha != want {
+		t.Fatalf("RefCommit(main) = %q, %v, %v; want %q, true, nil", sha, ok, err, want)
+	}
+
+	sha, ok, err = RefCommit(dir, "refs/heads/nope")
+	if err != nil || ok || sha != "" {
+		t.Fatalf("RefCommit(missing) = %q, %v, %v; want \"\", false, nil", sha, ok, err)
+	}
+
+	if _, _, err = RefCommit(dir, "-bad"); err == nil {
+		t.Error("RefCommit(-bad) error = nil, want flag rejection")
+	}
+	if _, _, err = RefCommit(dir, ""); err == nil {
+		t.Error("RefCommit(\"\") error = nil, want error")
+	}
+
+	// Not a repository: git exits 128, which is a failure, not "missing".
+	if _, _, err = RefCommit(t.TempDir(), "main"); err == nil {
+		t.Error("RefCommit outside a repo error = nil, want error")
+	}
+}

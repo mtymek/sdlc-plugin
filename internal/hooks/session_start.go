@@ -19,6 +19,7 @@ import (
 	"github.com/rnagrodzki/sdlc-plugin/internal/frontmatter"
 	"github.com/rnagrodzki/sdlc-plugin/internal/gitx"
 	"github.com/rnagrodzki/sdlc-plugin/internal/history"
+	"github.com/rnagrodzki/sdlc-plugin/internal/mcpserver"
 	"github.com/rnagrodzki/sdlc-plugin/internal/openspec"
 	"github.com/rnagrodzki/sdlc-plugin/internal/paths"
 	"github.com/rnagrodzki/sdlc-plugin/internal/shipmeta"
@@ -81,6 +82,7 @@ func sessionStart(_ HookCtx, event Event) (Output, error) {
 	resume = append(resume, safeStringsPhase("compact-recovery", compactRecoveryPhase)...)
 	resume = append(resume, safeStringsPhase("worktree-links", worktreeLinkPhase)...)
 	resume = append(resume, safeStringsPhase("openspec", openSpecPhase)...)
+	resume = append(resume, safeStringsPhase("vcs", vcsContextPhase)...)
 	resume = append(resume, safeStringsPhase("git", gitContextPhase)...)
 	resume = append(resume, safeStringsPhase("jira-cache", jiraCachePhase)...)
 	resume = append(resume, safeStringsPhase("ship-config", shipConfigPhase)...)
@@ -1238,6 +1240,40 @@ func pluralS(n int) string {
 // ---------------------------------------------------------------------------
 // Phase: git context
 // ---------------------------------------------------------------------------
+
+// vcsContextPhase reports the version control mode as one line. Unlike the
+// git phase it shows a detection error, so the user sees why branch info is
+// missing. Outside a repository (empty Root) it adds no line.
+func vcsContextPhase() []string {
+	info, err := detectVCSFunc(resolveActiveWorktreeSafe())
+	if err != nil {
+		msg := strings.TrimRight(err.Error(), ". ")
+		line := "VCS: error \u2014 " + msg + "."
+		var sugg string
+		var de *mcpserver.DomainError
+		var ie *mcpserver.InfraError
+		var dae *mcpserver.DataError
+		switch {
+		case errors.As(err, &de):
+			sugg = de.Suggestion
+		case errors.As(err, &ie):
+			sugg = ie.Suggestion
+		case errors.As(err, &dae):
+			sugg = dae.Suggestion
+		}
+		if sugg != "" {
+			line += " " + sugg
+		}
+		return []string{line}
+	}
+	if info.Root == "" {
+		return nil
+	}
+	if info.Mode == gitx.ModeJJ {
+		return []string{fmt.Sprintf("VCS: jj %s (colocated)", info.JJVersion)}
+	}
+	return []string{"VCS: git"}
+}
 
 func gitContextPhase() []string {
 	dir := resolveActiveWorktreeSafe()

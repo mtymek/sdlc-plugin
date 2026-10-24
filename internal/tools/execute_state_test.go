@@ -29,6 +29,7 @@ import (
 	"github.com/rnagrodzki/sdlc-plugin/internal/config"
 	"github.com/rnagrodzki/sdlc-plugin/internal/configmigrate"
 	"github.com/rnagrodzki/sdlc-plugin/internal/fsx"
+	"github.com/rnagrodzki/sdlc-plugin/internal/gitx"
 	"github.com/rnagrodzki/sdlc-plugin/internal/mcpserver"
 	"github.com/rnagrodzki/sdlc-plugin/internal/openspec"
 	"github.com/rnagrodzki/sdlc-plugin/internal/paths"
@@ -10415,5 +10416,91 @@ func TestExecState_LedgerSkip_ToolSurface(t *testing.T) {
 	}
 	if !hasSkip {
 		t.Errorf("action enum %v does not contain ledger_skip", schema.Properties["action"].Enum)
+	}
+}
+
+func stubJJMode(t *testing.T) {
+	t.Helper()
+	stubVCSDetect(t, func(string) (gitx.VCSInfo, error) { return gitx.VCSInfo{Mode: gitx.ModeJJ}, nil })
+}
+
+func TestExecState_WaveCommit_JJStop(t *testing.T) {
+	root := t.TempDir()
+	createExecState(t, root, "feat/test", map[string]any{
+		"waves":   []any{map[string]any{"number": 1, "status": "completed", "tasks": []any{}}},
+		"context": map[string]any{},
+	})
+	stubJJMode(t)
+	_, err := executeState(root, root, ExecuteStateIn{Action: "wave-commit", Branch: "feat/test", Wave: intPtr(1), Message: "msg"}, fixedClock(testNow))
+	var de *mcpserver.DomainError
+	if !errors.As(err, &de) {
+		t.Fatalf("want DomainError, got %v", err)
+	}
+}
+
+func TestExecState_WaveCommit_JJCommitWavesDisabledKeepsShape(t *testing.T) {
+	root := t.TempDir()
+	createExecState(t, root, "feat/test", map[string]any{
+		"waves":   []any{map[string]any{"number": 1, "status": "completed", "tasks": []any{}}},
+		"context": map[string]any{},
+	})
+	if err := config.WriteSection(root, "execute", map[string]any{"commitWaves": false}); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	stubJJMode(t)
+	res, err := executeState(root, root, ExecuteStateIn{Action: "wave-commit", Branch: "feat/test", Wave: intPtr(1), Message: "msg"}, fixedClock(testNow))
+	if err != nil {
+		t.Fatalf("wave-commit: %v", err)
+	}
+	out := res.(ExecWaveCommitOut)
+	if out.Committed || out.Reason != "execute.commitWaves is false" {
+		t.Errorf("out = %+v", out)
+	}
+	if out.Next == nil || !strings.HasPrefix(out.Next.Instruction, "jj mode: do not commit.") {
+		t.Errorf("Next = %+v, want jj text", out.Next)
+	}
+}
+
+func TestExecManualCommitInstruction(t *testing.T) {
+	stubVCSDetect(t, func(string) (gitx.VCSInfo, error) { return gitx.VCSInfo{Mode: gitx.ModeGit}, nil })
+	gitText := execManualCommitInstruction("/x", 2, 3)
+	if !strings.Contains(gitText, "git add -A && git commit") || strings.Contains(gitText, "version-control check failed") {
+		t.Errorf("git text = %q", gitText)
+	}
+	stubJJMode(t)
+	want := "jj mode: do not commit. Leave wave 2's changes in the working-copy change @, then call wave-committed for wave 2 with no sha before wave-start for wave 3."
+	if got := execManualCommitInstruction("/x", 2, 3); got != want {
+		t.Errorf("jj text = %q", got)
+	}
+	stubVCSDetect(t, func(string) (gitx.VCSInfo, error) { return gitx.VCSInfo{}, errors.New("boom") })
+	got := execManualCommitInstruction("/x", 2, 3)
+	if got != gitText+" (version-control check failed: boom)" {
+		t.Errorf("error text = %q", got)
+	}
+}
+
+func TestExecuteBaseSync_JJStop(t *testing.T) {
+	fx := newBaseSyncFixture(t, "")
+	stubJJMode(t)
+	_, err := fx.baseSync(t, 1)
+	var de *mcpserver.DomainError
+	if !errors.As(err, &de) {
+		t.Fatalf("want DomainError, got %v", err)
+	}
+	_, err = fx.baseSyncResolve(t, 1, false)
+	if !errors.As(err, &de) {
+		t.Fatalf("resolve: want DomainError, got %v", err)
+	}
+}
+
+func TestExecuteBaseSync_JJDisabledKeepsShape(t *testing.T) {
+	fx := newBaseSyncFixture(t, "[execute]\nbaseSync = false\n")
+	stubJJMode(t)
+	res, err := fx.baseSync(t, 1)
+	if err != nil {
+		t.Fatalf("base-sync: %v", err)
+	}
+	if res.Status != "disabled" {
+		t.Errorf("status = %q, want disabled", res.Status)
 	}
 }

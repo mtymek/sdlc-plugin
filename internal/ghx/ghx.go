@@ -633,8 +633,20 @@ const ghNoPRForBranch = "no pull requests found"
 // network error, or malformed JSON — collapses to Exists: false. Only the
 // plain "no PR for this branch" case leaves ErrorMessage empty; every other
 // failure sets it, so callers can tell "no PR" apart from "could not check".
-func PRForBranch(dir string) PRMetadata {
-	raw, err := run(dir, "pr", "view", "--json", "number,title,url,state,labels")
+func PRForBranch(dir string) PRMetadata { return PRForBranchName(dir, "") }
+
+// PRForBranchName is PRForBranch for a named branch: it runs `gh pr view
+// <branch> --json ...`. An empty branch runs the same command as PRForBranch,
+// so gh reads the branch from HEAD.
+func PRForBranchName(dir, branch string) PRMetadata {
+	args := []string{"pr", "view"}
+	if branch != "" {
+		if err := validatePositionalArg(branch, "PRForBranchName"); err != nil {
+			return PRMetadata{Exists: false, ErrorMessage: err.Error()}
+		}
+		args = append(args, branch)
+	}
+	raw, err := run(dir, append(args, "--json", "number,title,url,state,labels")...)
 	if err != nil {
 		if errors.Is(err, execx.ErrOutputCap) {
 			return PRMetadata{Exists: false, ErrorMessage: fmt.Sprintf("gh pr view output exceeded cap: %s", err.Error())}
@@ -679,6 +691,7 @@ func PRForBranch(dir string) PRMetadata {
 type PRCreateOpts struct {
 	Draft bool
 	Base  string
+	Head  string // jj mode: the bookmark; empty lets gh read HEAD
 }
 
 // PRCreate runs `gh pr create --title <title> --body <body>`, plus --draft
@@ -691,6 +704,9 @@ func PRCreate(dir, title, body string, opts PRCreateOpts) (string, error) {
 	}
 	if opts.Base != "" {
 		args = append(args, "--base", opts.Base)
+	}
+	if opts.Head != "" {
+		args = append(args, "--head", opts.Head)
 	}
 	return run(dir, args...)
 }
