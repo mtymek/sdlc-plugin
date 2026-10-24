@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.4.8] - 2026-10-24
+
+### RC 1
+
+- The preplan topic file shows one "Guardrail check" line. It replaces the guardrail table.
+- The "Open questions" section shows only when a question is open.
+- A new plan_support action, preplan_check, writes the check line. It rejects counts above 10000.
+- The preplan and plan skills, the docs pages and the specs match the new topic file.
+- New and stricter guardrails and review dimensions catch sibling-action and stored-file reader gaps earlier.
+
+### RC 2
+
+- Plan runs check counts and lookups in Go (new `plan_gates` action) instead of in lane agents, and use 5 lanes
+- Plan runs record step times, resume from step checkpoints, and print a timing report at the end
+- Step 5 uses 3 lenses at 8 or more tasks, and 1 reviewer on the opposite model below that
+- Later review rounds skip the G17 lane when the fixed entry has no issues
+- Guardrails for the skill flow, the MCP tools and the guard checks are tightened
+
 ## [0.4.7] - 2026-10-20
 
 ### RC 1
