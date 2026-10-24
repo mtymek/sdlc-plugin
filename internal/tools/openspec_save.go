@@ -85,6 +85,9 @@ func openspecSave(workDir string, in OpenspecSaveIn) (OpenspecSaveOut, error) {
 	}
 
 	target := "openspec/" + change
+	if err := jjWriteStop(workDir, jjOpOpenspecSave); err != nil {
+		return OpenspecSaveOut{}, err
+	}
 	create, err := openspecSaveGuards(workDir, change)
 	if err != nil {
 		return OpenspecSaveOut{}, err

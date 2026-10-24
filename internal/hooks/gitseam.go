@@ -46,6 +46,9 @@ var (
 	// currentBranchFunc resolves the current branch for a given directory.
 	// Defaults to gitx.CurrentBranch.
 	currentBranchFunc = gitx.CurrentBranch
+	// detectVCSFunc detects the VCS mode of a folder. Defaults to
+	// gitx.DetectVCS.
+	detectVCSFunc = gitx.DetectVCS
 	// findStateFunc looks up a pipeline's state file. Defaults to
 	// state.Find.
 	findStateFunc = state.Find

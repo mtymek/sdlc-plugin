@@ -29,6 +29,7 @@ import (
 	"github.com/rnagrodzki/sdlc-plugin/internal/config"
 	"github.com/rnagrodzki/sdlc-plugin/internal/configmigrate"
 	"github.com/rnagrodzki/sdlc-plugin/internal/fsx"
+	"github.com/rnagrodzki/sdlc-plugin/internal/gitx"
 	"github.com/rnagrodzki/sdlc-plugin/internal/mcpserver"
 	"github.com/rnagrodzki/sdlc-plugin/internal/openspec"
 	"github.com/rnagrodzki/sdlc-plugin/internal/paths"
@@ -10415,5 +10416,111 @@ func TestExecState_LedgerSkip_ToolSurface(t *testing.T) {
 	}
 	if !hasSkip {
 		t.Errorf("action enum %v does not contain ledger_skip", schema.Properties["action"].Enum)
+	}
+}
+
+func stubJJMode(t *testing.T) {
+	t.Helper()
+	stubVCSDetect(t, func(string) (gitx.VCSInfo, error) { return gitx.VCSInfo{Mode: gitx.ModeJJ}, nil })
+}
+
+func TestExecState_WaveCommit_JJStop(t *testing.T) {
+	root := t.TempDir()
+	createExecState(t, root, "feat/test", map[string]any{
+		"waves":   []any{map[string]any{"number": 1, "status": "completed", "tasks": []any{}}},
+		"context": map[string]any{},
+	})
+	stubJJMode(t)
+	before := readExecState(t, root, "feat/test")
+	_, err := executeState(root, root, ExecuteStateIn{Action: "wave-commit", Branch: "feat/test", Wave: intPtr(1), Message: "msg"}, fixedClock(testNow))
+	assertJJStop(t, err, jjOpWaveCommit)
+	if after := readExecState(t, root, "feat/test"); !reflect.DeepEqual(before, after) {
+		t.Errorf("state changed on a jj stop:\nbefore %v\nafter  %v", before, after)
+	}
+}
+
+func TestExecState_WaveCommit_JJCommitWavesDisabledKeepsShape(t *testing.T) {
+	root := t.TempDir()
+	createExecState(t, root, "feat/test", map[string]any{
+		"waves":   []any{map[string]any{"number": 1, "status": "completed", "tasks": []any{}}},
+		"context": map[string]any{},
+	})
+	if err := config.WriteSection(root, "execute", map[string]any{"commitWaves": false}); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	stubJJMode(t)
+	res, err := executeState(root, root, ExecuteStateIn{Action: "wave-commit", Branch: "feat/test", Wave: intPtr(1), Message: "msg"}, fixedClock(testNow))
+	if err != nil {
+		t.Fatalf("wave-commit: %v", err)
+	}
+	out := res.(ExecWaveCommitOut)
+	if out.Committed || out.Reason != "execute.commitWaves is false" {
+		t.Errorf("out = %+v", out)
+	}
+	if out.Next == nil || !strings.HasPrefix(out.Next.Instruction, "jj mode: do not commit.") {
+		t.Errorf("Next = %+v, want jj text", out.Next)
+	}
+}
+
+func TestExecManualCommitInstruction(t *testing.T) {
+	stubVCSDetect(t, func(string) (gitx.VCSInfo, error) { return gitx.VCSInfo{Mode: gitx.ModeGit}, nil })
+	gitText := execManualCommitInstruction("/x", 2, 3)
+	if !strings.Contains(gitText, "git add -A && git commit") || strings.Contains(gitText, "version-control check failed") {
+		t.Errorf("git text = %q", gitText)
+	}
+	stubJJMode(t)
+	want := "jj mode: do not commit. Leave wave 2's changes in the working-copy change @, then call wave-committed for wave 2 with no sha before wave-start for wave 3."
+	if got := execManualCommitInstruction("/x", 2, 3); got != want {
+		t.Errorf("jj text = %q", got)
+	}
+	stubVCSDetect(t, func(string) (gitx.VCSInfo, error) { return gitx.VCSInfo{}, errors.New("boom") })
+	got := execManualCommitInstruction("/x", 2, 3)
+	if got != gitText+" (version-control check failed: boom)" {
+		t.Errorf("error text = %q", got)
+	}
+}
+
+func TestExecuteBaseSync_JJStop(t *testing.T) {
+	fx := newBaseSyncFixture(t, "")
+	// A new commit on origin/main: a fetch or merge would move a ref.
+	fx.pushToOriginMain(t, "base.txt", "base\n")
+	head := gitOutTrim(t, fx.root, "rev-parse", "HEAD")
+	tracking := gitOutTrim(t, fx.root, "rev-parse", "refs/remotes/origin/main")
+	stateBefore, err := os.ReadFile(fx.statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stubJJMode(t)
+
+	_, err = fx.baseSync(t, 1)
+	assertJJStop(t, err, jjOpBaseSync)
+	_, err = fx.baseSyncResolve(t, 1, false)
+	assertJJStop(t, err, jjOpBaseSyncResolve)
+	_, err = fx.baseSyncResolve(t, 1, true)
+	assertJJStop(t, err, jjOpBaseSyncResolve)
+
+	if got := gitOutTrim(t, fx.root, "rev-parse", "HEAD"); got != head {
+		t.Errorf("HEAD moved: %s -> %s", head, got)
+	}
+	if got := gitOutTrim(t, fx.root, "rev-parse", "refs/remotes/origin/main"); got != tracking {
+		t.Errorf("origin/main moved (a fetch ran): %s -> %s", tracking, got)
+	}
+	if _, err := os.Stat(filepath.Join(fx.root, ".git", "MERGE_HEAD")); !os.IsNotExist(err) {
+		t.Errorf("MERGE_HEAD exists: a merge started (%v)", err)
+	}
+	if stateAfter, _ := os.ReadFile(fx.statePath); string(stateAfter) != string(stateBefore) {
+		t.Errorf("state file changed on a jj stop")
+	}
+}
+
+func TestExecuteBaseSync_JJDisabledKeepsShape(t *testing.T) {
+	fx := newBaseSyncFixture(t, "[execute]\nbaseSync = false\n")
+	stubJJMode(t)
+	res, err := fx.baseSync(t, 1)
+	if err != nil {
+		t.Fatalf("base-sync: %v", err)
+	}
+	if res.Status != "disabled" {
+		t.Errorf("status = %q, want disabled", res.Status)
 	}
 }

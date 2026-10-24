@@ -66,6 +66,7 @@ observe directly is SessionStart.
   run `/clear`, matcher `startup|clear|compact` in `hooks/hooks.json`).
 - Expect additional context injected at session start starting with
   `sdlc: v<version> (<N> skills loaded)`.
+- Expect a `VCS: git` line (or `VCS: jj <version> (colocated)` in a jj repository).
 
 If nothing appears on the very first session after install: expected on a
 cold cache (see README → "First-run binary fetch"). Do step 3 first, then

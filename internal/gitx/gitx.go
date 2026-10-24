@@ -16,14 +16,25 @@ import (
 	"fmt"
 	"os/exec"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/rnagrodzki/sdlc-plugin/internal/execx"
+	"github.com/rnagrodzki/sdlc-plugin/internal/mcpserver"
 )
 
 // CurrentBranch returns the name of the currently checked-out branch.
 // On detached HEAD it returns "HEAD". Outside a git repo it returns an error.
+// In a colocated jj repository it returns the one local bookmark on @, else
+// the one on @-, else "HEAD" (git HEAD is detached there).
 func CurrentBranch(dir string) (string, error) {
+	info, err := DetectVCS(dir)
+	if err != nil {
+		return "", err
+	}
+	if info.Mode == ModeJJ {
+		return jjCurrentBookmark(info.Root)
+	}
 	out, err := execx.Run("git", []string{"branch", "--show-current"}, execx.Options{Dir: dir})
 	if err != nil {
 		return "", fmt.Errorf("gitx: current branch: %w", err)
@@ -32,6 +43,65 @@ func CurrentBranch(dir string) (string, error) {
 		return "HEAD", nil // detached HEAD: git exits 0 with empty output
 	}
 	return out, nil
+}
+
+// jjCurrentBookmark reads local bookmarks on @, then @-. The read snapshots
+// the working copy so the answer is never stale.
+func jjCurrentBookmark(root string) (string, error) {
+	for _, rev := range []string{"@", "@-"} {
+		names, err := jjBookmarksAt(root, rev)
+		if err != nil {
+			return "", err
+		}
+		switch {
+		case len(names) == 0:
+			continue
+		case len(names) > 1:
+			return "", &mcpserver.DomainError{
+				Msg:        fmt.Sprintf("gitx: change %s has %d bookmarks: %s", rev, len(names), strings.Join(names, ", ")),
+				Suggestion: "Keep one bookmark on this change with jj bookmark delete <name> or jj bookmark move <name> --to <change>, then retry.",
+			}
+		case names[0] == "HEAD":
+			return "", &mcpserver.DomainError{
+				Msg:        `gitx: bookmark "HEAD" is a reserved name`,
+				Suggestion: "Rename it with jj bookmark rename HEAD <name>, then retry.",
+			}
+		}
+		// Callers pass the name to git and gh as an argument; a leading "-"
+		// would be read as a flag.
+		if err := validateRef(names[0], "jj bookmark"); err != nil {
+			return "", &mcpserver.DomainError{
+				Msg:        err.Error(),
+				Suggestion: fmt.Sprintf("Rename it with jj bookmark rename -- %s <name>, then retry.", names[0]),
+			}
+		}
+		return names[0], nil
+	}
+	return "HEAD", nil
+}
+
+// jjBookmarksAt returns the sorted, de-duplicated local bookmark names on rev.
+// A merge rev can print one name once per parent; it counts once.
+func jjBookmarksAt(root, rev string) ([]string, error) {
+	out, err := runJJ(root, "log", "-r", rev, "--no-graph", "--color=never",
+		"-T", `local_bookmarks.map(|b| b.name()).join("\n") ++ "\n"`)
+	if err != nil {
+		return nil, &mcpserver.InfraError{
+			Msg:        fmt.Sprintf("gitx: jj log -r %s: %v", rev, err),
+			Suggestion: fmt.Sprintf("Run jj log -r %s in the repository root to see the error, fix it, then retry.", rev),
+			Cause:      err,
+		}
+	}
+	seen := map[string]bool{}
+	var names []string
+	for _, line := range strings.Split(out, "\n") {
+		if n := strings.TrimSpace(line); n != "" && !seen[n] {
+			seen[n] = true
+			names = append(names, n)
+		}
+	}
+	sort.Strings(names)
+	return names, nil
 }
 
 // DefaultBranch auto-detects the repository's default base branch.
@@ -292,6 +362,30 @@ func TagExists(dir, name string) (bool, error) {
 	}
 	_, err := execx.Run("git", []string{"rev-parse", "--verify", "refs/tags/" + name}, execx.Options{Dir: dir})
 	return err == nil, nil
+}
+
+// RefCommit resolves ref with git rev-parse --verify --quiet <ref>^{commit}.
+// Exit 1 means the ref does not exist and yields ("", false, nil); any other
+// failure is returned as an error.
+func RefCommit(dir, ref string) (sha string, exists bool, err error) {
+	if ref == "" {
+		return "", false, fmt.Errorf("gitx: ref commit: ref is empty")
+	}
+	if err := validateRef(ref, "ref commit"); err != nil {
+		return "", false, err
+	}
+	out, stderr, code, runErr := execx.RunAllowExit("git", []string{"rev-parse", "--verify", "--quiet", ref + "^{commit}"}, execx.Options{Dir: dir})
+	if runErr != nil {
+		return "", false, fmt.Errorf("gitx: ref commit %s: %w", ref, runErr)
+	}
+	switch code {
+	case 0:
+		return strings.TrimSpace(out), true, nil
+	case 1:
+		return "", false, nil
+	default:
+		return "", false, fmt.Errorf("gitx: ref commit %s: git exited %d: %s", ref, code, strings.TrimSpace(stderr))
+	}
 }
 
 // CreateTag creates an annotated tag (git tag -a) named name at HEAD with

@@ -23,6 +23,7 @@ import (
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
 	"github.com/rnagrodzki/sdlc-plugin/internal/dimensions"
+	"github.com/rnagrodzki/sdlc-plugin/internal/gitx"
 	"github.com/rnagrodzki/sdlc-plugin/internal/history"
 	"github.com/rnagrodzki/sdlc-plugin/internal/mcpserver"
 	"github.com/rnagrodzki/sdlc-plugin/internal/paths"
@@ -7747,6 +7748,54 @@ func TestShipState_CommitCheck_DirtyStagesAndKeepsStep(t *testing.T) {
 	}
 	if got := commitStepEntry(t, path)["status"]; got != "in_progress" {
 		t.Errorf("commit status = %v, want in_progress", got)
+	}
+}
+
+// TestShipState_CommitCheck_JJModeStops checks that jj mode stops commit-check before git add and leaves the state file unchanged.
+func TestShipState_CommitCheck_JJModeStops(t *testing.T) {
+	branch := "feat/cc-jj"
+	dir, path := commitCheckFixture(t, branch)
+	writeFile(t, filepath.Join(dir, "a.txt"), "a")
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stubVCSDetect(t, func(string) (gitx.VCSInfo, error) { return gitx.VCSInfo{Mode: gitx.ModeJJ}, nil })
+
+	_, err = runCommitCheck(t, dir, branch)
+	assertJJStop(t, err, jjOpCommitCheck)
+	if staged := gitOut(t, dir, "diff", "--cached", "--name-only"); staged != "" {
+		t.Errorf("staged = %q, want nothing (no git add)", staged)
+	}
+	after, _ := os.ReadFile(path)
+	if string(after) != string(before) {
+		t.Errorf("ship state file changed")
+	}
+}
+
+// TestShipState_CommitCheck_DetectorErrorStopsBeforeWrite checks that a
+// detector error from jjWriteStop reaches the caller unchanged, before
+// commit-check stages anything or writes the ship state.
+func TestShipState_CommitCheck_DetectorErrorStopsBeforeWrite(t *testing.T) {
+	branch := "feat/cc-detect"
+	dir, path := commitCheckFixture(t, branch)
+	writeFile(t, filepath.Join(dir, "a.txt"), "a")
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := &mcpserver.InfraError{Msg: "gitx: cannot inspect /r/.jj: permission denied", Suggestion: "Check the folder permissions of /r/.jj, then retry."}
+	stubVCSDetect(t, func(string) (gitx.VCSInfo, error) { return gitx.VCSInfo{}, want })
+
+	_, err = runCommitCheck(t, dir, branch)
+	if !errors.Is(err, want) {
+		t.Fatalf("err = %v, want the detector error", err)
+	}
+	if staged := gitOut(t, dir, "diff", "--cached", "--name-only"); staged != "" {
+		t.Errorf("staged = %q, want nothing (no git add)", staged)
+	}
+	if after, _ := os.ReadFile(path); string(after) != string(before) {
+		t.Errorf("ship state file changed")
 	}
 }
 

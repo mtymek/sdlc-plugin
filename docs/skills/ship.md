@@ -190,6 +190,18 @@ On `--resume`, the saved status of the step decides what ship does:
   `/sdlc:received-review` to get them back. With `--auto`, ship does the
   same and asks nothing.
 
+## jj mode
+
+In a colocated jj repository `/ship` stops at step 3, before `ship_prepare` and before any state is written. Step 3 calls `ship_state({action:"vcs-mode"})` and prints its `next`:
+
+`jj mode: stop. Ship does not run in jj repositories yet. Run /execute with execute.commitWaves = false, commit with jj commit, push with jj git push -b <bookmark>, then run /pr.`
+
+`/ship --resume`, and choosing to resume an in-flight run, run the same check first, so a resumed run stops the same way.
+
+If the `vcs-mode` check itself fails, ship prints the error and its suggestion and stops, again with no state written. Causes: a `.jj` folder with no `.git` beside it (run `jj git init --colocate`), jj missing from `PATH` or older than 0.46 (install or upgrade jj), a folder that cannot be read, or a branch lookup that fails (for example two bookmarks on one change). Fix the cause the message names, then run `/ship` again.
+
+Git repositories run step 3 as written.
+
 ## Examples
 
 **Ship with a plan file:**

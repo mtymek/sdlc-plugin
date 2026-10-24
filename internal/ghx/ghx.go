@@ -628,13 +628,26 @@ type PRMetadata struct {
 const ghNoPRForBranch = "no pull requests found"
 
 // PRForBranch reports the PR for the current branch (no PR number needed),
-// mirroring lib/git.js's fetchPrMetadata. It never returns a Go error: any
-// failure — no PR found for the branch, gh missing, not authenticated,
-// network error, or malformed JSON — collapses to Exists: false. Only the
-// plain "no PR for this branch" case leaves ErrorMessage empty; every other
+// mirroring lib/git.js's fetchPrMetadata. It is PRForBranchName with an
+// empty branch.
+func PRForBranch(dir string) PRMetadata { return PRForBranchName(dir, "") }
+
+// PRForBranchName reports the PR for branch: it runs `gh pr view <branch>
+// --json ...`. An empty branch leaves the name out, so gh reads the branch
+// from HEAD. It never returns a Go error: any failure — no PR found for the
+// branch, a flag-like branch name, gh missing, not authenticated, network
+// error, or malformed JSON — collapses to Exists: false. Only the plain
+// "no PR for this branch" case leaves ErrorMessage empty; every other
 // failure sets it, so callers can tell "no PR" apart from "could not check".
-func PRForBranch(dir string) PRMetadata {
-	raw, err := run(dir, "pr", "view", "--json", "number,title,url,state,labels")
+func PRForBranchName(dir, branch string) PRMetadata {
+	args := []string{"pr", "view"}
+	if branch != "" {
+		if err := validatePositionalArg(branch, "PRForBranchName"); err != nil {
+			return PRMetadata{Exists: false, ErrorMessage: err.Error()}
+		}
+		args = append(args, branch)
+	}
+	raw, err := run(dir, append(args, "--json", "number,title,url,state,labels")...)
 	if err != nil {
 		if errors.Is(err, execx.ErrOutputCap) {
 			return PRMetadata{Exists: false, ErrorMessage: fmt.Sprintf("gh pr view output exceeded cap: %s", err.Error())}
@@ -679,18 +692,30 @@ func PRForBranch(dir string) PRMetadata {
 type PRCreateOpts struct {
 	Draft bool
 	Base  string
+	Head  string // jj mode: the bookmark; empty lets gh read HEAD
 }
 
-// PRCreate runs `gh pr create --title <title> --body <body>`, plus --draft
-// and --base <branch> when set in opts, and returns the created PR's URL
+// PRCreate runs `gh pr create --title <title> --body <body>`, plus --draft,
+// --base <branch> and --head <branch> when set in opts, and returns the created PR's URL
 // (gh's stdout).
 func PRCreate(dir, title, body string, opts PRCreateOpts) (string, error) {
+	for _, v := range []struct{ val, name string }{{opts.Base, "PRCreate base"}, {opts.Head, "PRCreate head"}} {
+		if v.val == "" {
+			continue
+		}
+		if err := validatePositionalArg(v.val, v.name); err != nil {
+			return "", err
+		}
+	}
 	args := []string{"pr", "create", "--title", title, "--body", body}
 	if opts.Draft {
 		args = append(args, "--draft")
 	}
 	if opts.Base != "" {
 		args = append(args, "--base", opts.Base)
+	}
+	if opts.Head != "" {
+		args = append(args, "--head", opts.Head)
 	}
 	return run(dir, args...)
 }

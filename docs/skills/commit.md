@@ -149,6 +149,7 @@ Or edit `.sdlc-v2/config.toml` directly.
 - **`.sdlc-v2/` is never committed by the skill** — Changes to the runtime state directory are left in the working tree; commit them yourself if you mean to.
 - **No WIP squashing** — WIP commits remain as separate commits; squash them manually if needed.
 - **Commit on default branch** — Allowed but warned about; you must confirm.
+- **jj repositories** — The skill stops before any write. Commit by hand: `jj commit <paths> -m "<message>"`, then `jj bookmark set <bookmark> -r @-`.
 
 ## Next steps
 

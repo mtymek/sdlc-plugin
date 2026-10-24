@@ -12,7 +12,11 @@ There is no walkthrough fallback in this port. The source skill's `ship-init.js`
 
 ## --resume handler
 
-If `--resume` was passed (or the pipeline auto-detects an in-flight run — see SKILL.md's Step loop, item 2), do **not** call `ship_prepare`. Call:
+If `--resume` was passed (or the pipeline auto-detects an in-flight run — see SKILL.md's Step loop, item 2), do **not** call `ship_prepare`.
+
+**jj gate first.** Before anything else in this handler, call `ship_state({action:"vcs-mode"})`, the same gate as SKILL.md's step 3. An error → print its message and suggestion, stop. `mode` jj → print the response's `next` verbatim and end the run; nothing is resumed. Git mode → continue below.
+
+Call:
 
 ```
 ship_state({action:"read"})

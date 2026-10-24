@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/rnagrodzki/sdlc-plugin/internal/gitx"
 	"github.com/rnagrodzki/sdlc-plugin/internal/mcpserver"
 	"github.com/rnagrodzki/sdlc-plugin/internal/openspec"
 )
@@ -257,6 +258,26 @@ func TestOpenspecSave_DefaultBranchFromOriginHead(t *testing.T) {
 // second call returns already with the staged files and the exact summary,
 // and after a commit it returns already with no staged file, the summary for
 // zero files, and the nothing-staged next step.
+func TestOpenspecSave_JJModeStops(t *testing.T) {
+	root, planPath := saveFixture(t)
+	stubVCSDetect(t, func(string) (gitx.VCSInfo, error) { return gitx.VCSInfo{Mode: gitx.ModeJJ}, nil })
+	_, err := openspecSave(root, OpenspecSaveIn{PlanPath: planPath})
+	assertJJStop(t, err, jjOpOpenspecSave)
+	assertSaveUntouched(t, root, planPath, "main")
+}
+
+func TestOpenspecSave_JJModeAlreadySavedShortcut(t *testing.T) {
+	root, planPath := saveFixture(t)
+	if _, err := openspecSave(root, OpenspecSaveIn{PlanPath: planPath}); err != nil {
+		t.Fatalf("first save: %v", err)
+	}
+	stubVCSDetect(t, func(string) (gitx.VCSInfo, error) { return gitx.VCSInfo{Mode: gitx.ModeJJ}, nil })
+	out, err := openspecSave(root, OpenspecSaveIn{PlanPath: planPath})
+	if err != nil || out.Materialized != "already" {
+		t.Fatalf("out = %+v, err = %v; want the already shortcut in jj mode", out, err)
+	}
+}
+
 func TestOpenspecSave_AlreadySaved(t *testing.T) {
 	root, planPath := saveFixture(t)
 	if _, err := openspecSave(root, OpenspecSaveIn{PlanPath: planPath}); err != nil {

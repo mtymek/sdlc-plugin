@@ -863,3 +863,71 @@ func TestRepoAccessProbe(t *testing.T) {
 		})
 	}
 }
+
+// ghArgsStub writes a gh stub that records its argv to a file and prints out.
+func ghArgsStub(t *testing.T, out string) string {
+	t.Helper()
+	rec := filepath.Join(t.TempDir(), "args.txt")
+	cleanup := stubGH(t, "#!/bin/sh\necho \"$@\" > '"+rec+"'\necho '"+out+"'\n")
+	t.Cleanup(cleanup)
+	return rec
+}
+
+func readArgs(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read recorded args: %v", err)
+	}
+	return strings.TrimSpace(string(b))
+}
+
+func TestPRForBranchName_Args(t *testing.T) {
+	const fields = "--json number,title,url,state,labels"
+	rec := ghArgsStub(t, `{"number":7,"title":"t","url":"u","state":"OPEN","labels":[]}`)
+
+	meta := PRForBranchName(".", "feat/x")
+	if !meta.Exists || meta.Number != 7 {
+		t.Fatalf("meta = %+v, want existing PR 7", meta)
+	}
+	if got, want := readArgs(t, rec), "pr view feat/x "+fields; got != want {
+		t.Errorf("args = %q, want %q", got, want)
+	}
+
+	PRForBranchName(".", "")
+	if got, want := readArgs(t, rec), "pr view "+fields; got != want {
+		t.Errorf("empty-name args = %q, want %q", got, want)
+	}
+
+	PRForBranch(".")
+	if got, want := readArgs(t, rec), "pr view "+fields; got != want {
+		t.Errorf("PRForBranch args = %q, want %q", got, want)
+	}
+
+	if m := PRForBranchName(".", "-x"); m.Exists || m.ErrorMessage == "" {
+		t.Errorf("flag-like branch meta = %+v, want error message", m)
+	}
+}
+
+func TestPRCreate_Head(t *testing.T) {
+	rec := ghArgsStub(t, "https://example.test/pr/1")
+
+	if _, err := PRCreate(".", "T", "B", PRCreateOpts{Head: "feat/x"}); err != nil {
+		t.Fatalf("PRCreate: %v", err)
+	}
+	if got := readArgs(t, rec); !strings.Contains(got, "--head feat/x") {
+		t.Errorf("args = %q, want --head feat/x", got)
+	}
+
+	if _, err := PRCreate(".", "T", "B", PRCreateOpts{}); err != nil {
+		t.Fatalf("PRCreate: %v", err)
+	}
+	if got := readArgs(t, rec); strings.Contains(got, "--head") {
+		t.Errorf("args = %q, want no --head", got)
+	}
+	for _, opts := range []PRCreateOpts{{Head: "-x"}, {Base: "-x"}} {
+		if _, err := PRCreate(".", "T", "B", opts); err == nil || !strings.Contains(err.Error(), "looks like a flag") {
+			t.Errorf("PRCreate(%+v) err = %v, want a flag-like rejection", opts, err)
+		}
+	}
+}

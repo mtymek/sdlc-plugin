@@ -66,6 +66,7 @@ pushing additional commits.
 - **Create vs. update is automatic.** The skill detects whether a PR exists for
   the current branch. There is no `--update` flag.
 - **Must be on a feature branch.** The skill refuses to run on `main`/`master`.
+- **jj repositories:** `pr` does not push. Push the bookmark with `jj git push -b <bookmark>` first. `pr` stops when the bookmark is missing on origin, differs from it, or does not exist (`jj bookmark create <name> -r @-`).
 - **`--draft` and `--base` only affect a new PR.** When the branch already has
   an open PR, the skill updates it and tells you each of these flags was
   ignored: `gh pr edit` cannot make a PR a draft or change its base. Use

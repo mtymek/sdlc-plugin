@@ -22,6 +22,7 @@ import (
 	"strings"
 
 	"github.com/rnagrodzki/sdlc-plugin/internal/execx"
+	"github.com/rnagrodzki/sdlc-plugin/internal/gitx"
 )
 
 // MainRoot returns the absolute path of the main (primary) git worktree by
@@ -40,6 +41,9 @@ func MainRoot() (string, error) {
 func mainRootIn(dir string) (string, error) {
 	out, err := execx.Run("git", []string{"worktree", "list", "--porcelain"}, execx.Options{Dir: dir})
 	if err != nil {
+		if ncErr := gitx.NonColocatedError(dir); ncErr != nil {
+			return "", fmt.Errorf("worktree: could not determine main worktree: %w", ncErr)
+		}
 		return "", fmt.Errorf("worktree: could not determine main worktree: %w", err)
 	}
 
@@ -117,6 +121,9 @@ func ActiveRoot() (string, error) {
 func activeRootIn(dir string) (string, error) {
 	out, err := execx.Run("git", []string{"rev-parse", "--show-toplevel"}, execx.Options{Dir: dir})
 	if err != nil {
+		if ncErr := gitx.NonColocatedError(dir); ncErr != nil {
+			return "", fmt.Errorf("worktree: could not determine active worktree: %w", ncErr)
+		}
 		return "", fmt.Errorf("worktree: could not determine active worktree: %w", err)
 	}
 

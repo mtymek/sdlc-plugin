@@ -591,6 +591,10 @@ func commitApplyNext(skippedUntracked, skippedTracked []string) string {
 // tracked changes under paths.DataDir are left alone and returned in
 // SkippedTrackedPaths. Next names the follow-up step for both.
 func commitApply(cfgRoot, gitRoot string, in CommitApplyIn) (CommitApplyOut, error) {
+	// jj mode: stop before any git command or other check.
+	if err := jjWriteStop(gitRoot, jjOpCommitApply); err != nil {
+		return CommitApplyOut{}, err
+	}
 	if strings.TrimSpace(in.Message) == "" {
 		return CommitApplyOut{}, &mcpserver.DataError{
 			Msg:        "commit message must not be empty",
@@ -727,7 +731,7 @@ func RegisterCommitTools(s *mcpserver.Server) {
 	)
 
 	mcpserver.Register(s, "commit_apply",
-		"Create a git commit with the given message from the tracked changes in the working tree plus anything already staged, and return the commit SHA. Files are staged by an explicit path list, never by sweeping the whole tree: untracked files are not staged or deleted and are named in skippedUntrackedPaths, and tracked changes under .sdlc-v2/ are not staged either and are named in skippedTrackedPaths. git add any file from either list that belongs in the commit before calling. Not terminal: read next, which states whether the commit holds everything or a git add plus a second commit_apply call is still needed.",
+		"Create a git commit with the given message from the tracked changes in the working tree plus anything already staged, and return the commit SHA. Files are staged by an explicit path list, never by sweeping the whole tree: untracked files are not staged or deleted and are named in skippedUntrackedPaths, and tracked changes under .sdlc-v2/ are not staged either and are named in skippedTrackedPaths. git add any file from either list that belongs in the commit before calling. Not terminal: read next, which states whether the commit holds everything or a git add plus a second commit_apply call is still needed. In a jj repository it stops before any write with a DomainError whose suggestion gives the jj commit command.",
 		mcpserver.Annotations{
 			Title:       "Create a git commit",
 			ReadOnly:    false,

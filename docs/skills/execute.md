@@ -30,7 +30,7 @@ verification after each wave and automatic recovery from failures.
 | `--auto` | Skip all interactive prompts. | off — unless `executePrefs.auto` is set, or a dispatching `/ship` run is itself in auto mode; the three sources are OR-combined. See [Configuration](#configuration). |
 | `--branch <name>` | Create and check out this branch before executing. | auto-derived |
 | `--wave-timeout <s>` | Max seconds a single wave can run. Also used as each task's total-runtime ceiling when the server classifies still-open tasks. | `1800` |
-| `--commit-waves <true\|false>` | Commit each wave separately. Forwarded by `/ship` only when `ship.execute.commitWaves` is set. | `execute.commitWaves` in `config.toml`, else `true` |
+| `--commit-waves <true\|false>` | Commit each wave separately. Forwarded by `/ship` only when `ship.execute.commitWaves` is set. In a jj repository it must resolve to `false`, or the run stops. | `execute.commitWaves` in `config.toml`, else `true` |
 | `--wave-interval <s>` | Seconds between wave-await liveness polls. Also sets a heartbeat-staleness threshold of 10x this value (default 600s) before a worker is considered stalled, and a reclaim grace of max(5x this value, 300s) (default 300s) before a worker that never answers the reclaim is failed. See [Execute wave supervision](../execute-wave-supervision.md). | `60` |
 
 ### Quality tiers
@@ -66,6 +66,18 @@ repository default branch when that key is absent or empty.
 - On conflict, one sub-agent resolves it; if it fails, the merge is aborted
   and the run continues on the previous base.
 - Turn this off with `[execute] baseSync = false`.
+
+## jj mode
+
+In a colocated jj repository (`.jj/` and `.git/` side by side) `/execute` reads `vcs` and `next` from `resolve-config` and follows `next` before anything else.
+
+- A `next` that starts with `Stop` or `jj mode: stop` ends the run before any state is written. A `next` that matches no known route also ends the run. Re-run after fixing the cause:
+  - `Stop: the version-control check failed. …` — the check could not tell git from jj (for example `.jj` without `.git`, or jj missing or older than 0.46). The warning names the cause and the fix.
+  - `jj mode: stop. The bookmark check failed. …` — the bookmark lookup failed (for example two bookmarks on one change) or `[git] baseBranch` is invalid. Follow the warning's suggestion.
+  - `jj mode: stop. Wave commits do not run in jj repositories yet. Set execute.commitWaves = false in .sdlc-v2/config.toml, then re-run /execute.` — the resolved `commitWaves` is true. A `--commit-waves true` flag, including one that `/ship` forwards, overrides the config key and also causes this stop.
+  - `jj mode: stop. Create a feature bookmark with jj bookmark create <name> -r @, then re-run /execute.`
+- Otherwise the run continues on the bookmark (`vcs.branch`) with `execute.commitWaves = false`. Wave changes stay in `@`; the report includes `jj mode: wave changes are uncommitted in @; commit them with jj commit.`
+- The pre-execution rebase and the base-sync stage are skipped. The pre-execution step prints `jj mode: rebase skipped — run jj git fetch, then jj rebase -d <base>@origin.` once, for every `--rebase` value.
 
 ## Examples
 

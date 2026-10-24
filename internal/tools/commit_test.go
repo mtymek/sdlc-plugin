@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/rnagrodzki/sdlc-plugin/internal/gitx"
 	"github.com/rnagrodzki/sdlc-plugin/internal/mcpserver"
 	"github.com/rnagrodzki/sdlc-plugin/internal/paths"
 )
@@ -1375,4 +1376,82 @@ func runGit(t *testing.T, dir string, args ...string) {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git %s: %s: %v", strings.Join(args, " "), out, err)
 	}
+}
+
+// gitHead returns HEAD's SHA, or "" when HEAD does not resolve.
+func gitHead(t *testing.T, dir string) string {
+	t.Helper()
+	cmd := exec.Command("git", "rev-parse", "--verify", "-q", "HEAD")
+	cmd.Dir = dir
+	out, _ := cmd.Output()
+	return strings.TrimSpace(string(out))
+}
+
+func TestCommitApply_JJModeStops(t *testing.T) {
+	dir := t.TempDir()
+	initGitFixture(t, dir)
+	gitCommit(t, dir, "initial")
+	if err := os.WriteFile(filepath.Join(dir, "new.txt"), []byte("new"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, dir, "add", "new.txt")
+	headBefore := gitHead(t, dir)
+	indexBefore := stagedNames(t, dir)
+	stubVCSDetect(t, func(string) (gitx.VCSInfo, error) { return gitx.VCSInfo{Mode: gitx.ModeJJ}, nil })
+
+	// Empty message: the stop must come before the message check.
+	_, err := commitApply(dir, dir, CommitApplyIn{Message: "", SkipConfigCheck: true})
+	var de *mcpserver.DomainError
+	if !errors.As(err, &de) {
+		t.Fatalf("want DomainError, got %T %v", err, err)
+	}
+	if de.Msg != "commit_apply: this is a jj repository; the plugin does not write in jj mode yet" {
+		t.Errorf("Msg = %q", de.Msg)
+	}
+	want := `Commit by hand: jj commit <paths> -m "<message>", then jj bookmark set <bookmark> -r @-.`
+	if de.Suggestion != want {
+		t.Errorf("suggestion = %q", de.Suggestion)
+	}
+	if got := gitHead(t, dir); got != headBefore {
+		t.Errorf("HEAD changed: %q -> %q", headBefore, got)
+	}
+	if got := stagedNames(t, dir); got != indexBefore {
+		t.Errorf("index changed: %q -> %q", indexBefore, got)
+	}
+}
+
+func TestCommitApply_ChecksGitRootNotCfgRoot(t *testing.T) {
+	cfg, git := t.TempDir(), t.TempDir()
+	detect := func(jjDir string) func(string) (gitx.VCSInfo, error) {
+		return func(d string) (gitx.VCSInfo, error) {
+			if d == jjDir {
+				return gitx.VCSInfo{Mode: gitx.ModeJJ}, nil
+			}
+			return gitx.VCSInfo{Mode: gitx.ModeGit}, nil
+		}
+	}
+	// git cfgRoot, jj gitRoot: stops.
+	stubVCSDetect(t, detect(git))
+	_, err := commitApply(cfg, git, CommitApplyIn{Message: "x", SkipConfigCheck: true})
+	var de *mcpserver.DomainError
+	if !errors.As(err, &de) || de.Msg == "" || !strings.Contains(de.Msg, "jj repository") {
+		t.Fatalf("jj gitRoot must stop, got %v", err)
+	}
+	// jj cfgRoot, git gitRoot: no stop (fails later for other reasons).
+	stubVCSDetect(t, detect(cfg))
+	_, err = commitApply(cfg, git, CommitApplyIn{Message: "x", SkipConfigCheck: true})
+	if errors.As(err, &de) && strings.Contains(de.Msg, "jj repository") {
+		t.Fatalf("jj cfgRoot must not stop, got %v", err)
+	}
+}
+
+func stagedNames(t *testing.T, dir string) string {
+	t.Helper()
+	cmd := exec.Command("git", "diff", "--cached", "--name-only")
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(out)
 }
