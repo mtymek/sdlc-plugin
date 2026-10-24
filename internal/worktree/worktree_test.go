@@ -1,6 +1,7 @@
 package worktree
 
 import (
+	"errors"
 	"go/parser"
 	"go/token"
 	"os"
@@ -8,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/rnagrodzki/sdlc-plugin/internal/mcpserver"
 )
 
 // forbiddenImports enforces the layering rule documented on the package: this
@@ -217,5 +220,24 @@ func TestActiveRootIn_NonRepo(t *testing.T) {
 	}
 	if got != "" {
 		t.Errorf("activeRootIn(%s) = %q on error; want empty string", dir, got)
+	}
+}
+
+// A jj repository without .git must surface the non-colocated DomainError
+// from both root lookups instead of a bare git failure.
+func TestRootLookups_NonColocatedJJ(t *testing.T) {
+	dir := realPath(t, t.TempDir())
+	if err := os.Mkdir(filepath.Join(dir, ".jj"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, fn := range map[string]func(string) (string, error){"mainRootIn": mainRootIn, "activeRootIn": activeRootIn} {
+		got, err := fn(dir)
+		if err == nil || got != "" {
+			t.Fatalf("%s = %q, %v; want empty and error", name, got, err)
+		}
+		var de *mcpserver.DomainError
+		if !errors.As(err, &de) || !strings.Contains(err.Error(), "not colocated") {
+			t.Errorf("%s error = %v; want non-colocated DomainError", name, err)
+		}
 	}
 }

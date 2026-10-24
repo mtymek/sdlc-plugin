@@ -16,14 +16,25 @@ import (
 	"fmt"
 	"os/exec"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/rnagrodzki/sdlc-plugin/internal/execx"
+	"github.com/rnagrodzki/sdlc-plugin/internal/mcpserver"
 )
 
 // CurrentBranch returns the name of the currently checked-out branch.
 // On detached HEAD it returns "HEAD". Outside a git repo it returns an error.
+// In a colocated jj repository it returns the one local bookmark on @, else
+// the one on @-, else "HEAD" (git HEAD is detached there).
 func CurrentBranch(dir string) (string, error) {
+	info, err := DetectVCS(dir)
+	if err != nil {
+		return "", err
+	}
+	if info.Mode == ModeJJ {
+		return jjCurrentBookmark(info.Root)
+	}
 	out, err := execx.Run("git", []string{"branch", "--show-current"}, execx.Options{Dir: dir})
 	if err != nil {
 		return "", fmt.Errorf("gitx: current branch: %w", err)
@@ -32,6 +43,57 @@ func CurrentBranch(dir string) (string, error) {
 		return "HEAD", nil // detached HEAD: git exits 0 with empty output
 	}
 	return out, nil
+}
+
+// jjCurrentBookmark reads local bookmarks on @, then @-. The read snapshots
+// the working copy so the answer is never stale.
+func jjCurrentBookmark(root string) (string, error) {
+	for _, rev := range []string{"@", "@-"} {
+		names, err := jjBookmarksAt(root, rev)
+		if err != nil {
+			return "", err
+		}
+		switch {
+		case len(names) == 0:
+			continue
+		case len(names) > 1:
+			return "", &mcpserver.DomainError{
+				Msg:        fmt.Sprintf("gitx: change %s has %d bookmarks: %s", rev, len(names), strings.Join(names, ", ")),
+				Suggestion: "Keep one bookmark on this change with jj bookmark delete <name> or jj bookmark move <name> --to <change>, then retry.",
+			}
+		case names[0] == "HEAD":
+			return "", &mcpserver.DomainError{
+				Msg:        `gitx: bookmark "HEAD" is a reserved name`,
+				Suggestion: "Rename it with jj bookmark rename HEAD <name>, then retry.",
+			}
+		}
+		return names[0], nil
+	}
+	return "HEAD", nil
+}
+
+// jjBookmarksAt returns the sorted, de-duplicated local bookmark names on rev.
+// A merge rev can print one name once per parent; it counts once.
+func jjBookmarksAt(root, rev string) ([]string, error) {
+	out, err := runJJ(root, "log", "-r", rev, "--no-graph", "--color=never",
+		"-T", `local_bookmarks.map(|b| b.name()).join("\n") ++ "\n"`)
+	if err != nil {
+		return nil, &mcpserver.InfraError{
+			Msg:        fmt.Sprintf("gitx: jj log -r %s: %v", rev, err),
+			Suggestion: fmt.Sprintf("Run jj log -r %s in the repository root to see the error, fix it, then retry.", rev),
+			Cause:      err,
+		}
+	}
+	seen := map[string]bool{}
+	var names []string
+	for _, line := range strings.Split(out, "\n") {
+		if n := strings.TrimSpace(line); n != "" && !seen[n] {
+			seen[n] = true
+			names = append(names, n)
+		}
+	}
+	sort.Strings(names)
+	return names, nil
 }
 
 // DefaultBranch auto-detects the repository's default base branch.
